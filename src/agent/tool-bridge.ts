@@ -185,8 +185,12 @@ export class ToolBridge {
           error: result.ok ? undefined : `${result.error.code}: ${truncate(result.error.message, 300)}`,
         });
         const payload = result.ok ? { ok: true, result: result.output } : { ok: false, error: result.error };
+        const images = result.ok ? (result.images ?? []) : [];
         return ok({
-          content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+          content: [
+            { type: "text", text: JSON.stringify(payload, null, 2) },
+            ...images.map((im) => ({ type: "image", data: im.data, mimeType: im.mimeType })),
+          ],
           structuredContent: payload,
           isError: !result.ok,
         });

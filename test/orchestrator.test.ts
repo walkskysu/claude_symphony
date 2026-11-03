@@ -174,6 +174,20 @@ describe("orchestrator", () => {
     assert.ok(fs.existsSync(path.join(dir, "logs", "T-1", "latest.log")));
   });
 
+  it("passes adapter issueEnvironment to hooks and the agent", async () => {
+    const tracker = Object.assign(new MemoryTracker([mkIssue({ id: "o/r#1", identifier: "r-1" })]), {
+      issueEnvironment: (i: { id: string }) => ({ SYMPHONY_ISSUE_REPO: i.id.split("#")[0] }),
+    });
+    const rec = path.join(tmpDir(), "rec.jsonl");
+    process.env.FAKE_RECORD = rec;
+    const hooks = 'hooks:\n  after_create: |\n    echo "$SYMPHONY_ISSUE_REPO" > repo.txt';
+    const { orch, dir } = await startOrch(tracker, hooks);
+    await waitFor(() => orch.retryAttempts.has("o/r#1"), 15000);
+    assert.equal(fs.readFileSync(path.join(dir, "ws", "r-1", "repo.txt"), "utf8").trim(), "o/r");
+    const start = fs.readFileSync(rec, "utf8").trim().split("\n").map((l) => JSON.parse(l)).find((l) => l.kind === "start");
+    assert.equal(start.env.SYMPHONY_ISSUE_REPO, "o/r");
+  });
+
   it("does not dispatch non-dispatchable, label-missing, or already-claimed issues; respects per-state limits", async () => {
     const tracker = new MemoryTracker([
       mkIssue({ id: "1", dispatchable: false, labels: ["agent"] }),

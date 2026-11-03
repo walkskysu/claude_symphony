@@ -259,13 +259,24 @@ export class Orchestrator {
     this.log.info("symphony stopped", {});
   }
 
+  /** Env for `before_remove`: issue id plus adapter-provided vars (e.g. its repository). */
+  private removeEnv(issue: Issue): Record<string, string> {
+    let extra: Record<string, string> = {};
+    try {
+      extra = this.effective?.tracker.adapter.issueEnvironment?.(issue) ?? {};
+    } catch {
+      /* best effort */
+    }
+    return { ...extra, SYMPHONY_ISSUE_ID: issue.id };
+  }
+
   private async startupTerminalCleanup(): Promise<void> {
     const eff = this.effective!;
     try {
       const issues = await eff.tracker.adapter.fetchIssuesByStates(eff.tracker.terminalStates);
       let removed = 0;
       for (const i of issues) {
-        if (await this.workspaces.removeWorkspace(i.identifier, { SYMPHONY_ISSUE_ID: i.id })) removed++;
+        if (await this.workspaces.removeWorkspace(i.identifier, this.removeEnv(i))) removed++;
       }
       this.log.info("startup terminal cleanup completed", { terminal_issues: issues.length, removed });
     } catch (err) {
@@ -557,7 +568,7 @@ export class Orchestrator {
         this.claimed.delete(entry.issue_id);
         hist.last_status = "released";
         log.info("worker stopped by reconciliation; claim released", { reason: kind, cleanup_workspace: cleanup });
-        if (cleanup) await this.workspaces.removeWorkspace(entry.identifier, { SYMPHONY_ISSUE_ID: entry.issue_id });
+        if (cleanup) await this.workspaces.removeWorkspace(entry.identifier, this.removeEnv(entry.issue));
       }
       this.notify();
       return;
@@ -647,7 +658,7 @@ export class Orchestrator {
     if (this.isTerminal(issue.state)) {
       this.claimed.delete(issueId);
       log.info("retry: issue is terminal; cleaning workspace and releasing", { state: issue.state });
-      await this.workspaces.removeWorkspace(issue.identifier, { SYMPHONY_ISSUE_ID: issue.id });
+      await this.workspaces.removeWorkspace(issue.identifier, this.removeEnv(issue));
       this.notify();
       return;
     }

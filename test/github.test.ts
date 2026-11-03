@@ -49,8 +49,10 @@ describe("github provider config", () => {
     assert.throws(() => parseGitHubProvider({ owner: "o" }, {}), (e: TrackerError) => e.category === "invalid_tracker_config");
     assert.throws(() => parseGitHubProvider({ owner: "o", repo: "r", token: "$EMPTY" }, { EMPTY: "" }), (e: TrackerError) => e.category === "missing_tracker_secret");
     const c = parseGitHubProvider({ repository: "acme/app" }, { GH_TOKEN: "t" });
-    assert.equal(c.owner, "acme");
-    assert.equal(c.repo, "app");
+    assert.equal(c.repos[0].owner, "acme");
+    assert.equal(c.repos[0].repo, "app");
+    assert.equal(c.repos[0].identifier_prefix, "app");
+    assert.equal(c.web_url, "https://github.com");
     assert.equal(c.token, "t");
     assert.equal(c.token_env, "GH_TOKEN");
   });
@@ -79,7 +81,7 @@ describe("github adapter reads", () => {
     const issues = await adapter(m.fn).fetchIssuesByStates(["Todo"]);
     assert.deepEqual(issues.map((i) => i.identifier), ["r-1", "r-3"]);
     const i1 = issues[0];
-    assert.equal(i1.id, "1");
+    assert.equal(i1.id, "o/r#1");
     assert.equal(i1.state, "Todo");
     assert.equal(i1.priority, 2);
     assert.deepEqual(i1.labels, ["status:todo", "priority:2"]);
@@ -108,9 +110,9 @@ describe("github adapter reads", () => {
       return undefined;
     });
     const a = adapter(m.fn);
-    const got = await a.fetchIssuesByIds(["1", "2", "3", "1"]);
-    assert.deepEqual(got.map((i) => i.id), ["1"]);
-    await assert.rejects(a.fetchIssuesByIds(["5"]), (e: TrackerError) => e.category === "tracker_response");
+    const got = await a.fetchIssuesByIds(["o/r#1", "o/r#2", "o/r#3", "o/r#1", "1", "x/y#1"]);
+    assert.deepEqual(got.map((i) => i.id), ["o/r#1"]);
+    await assert.rejects(a.fetchIssuesByIds(["o/r#5"]), (e: TrackerError) => e.category === "tracker_response");
   });
 
   it("maps errors: status, rate limit, transport", async () => {
@@ -139,7 +141,7 @@ describe("github adapter reads", () => {
 });
 
 describe("github agent tools", () => {
-  const ctx = { issue: mkIssue({ id: "7", native_ref: { number: 7 } }), workspacePath: "/tmp/x" };
+  const ctx = { issue: mkIssue({ id: "o/r#7", native_ref: { owner: "o", repo: "r", number: 7 } }), workspacePath: "/tmp/x" };
 
   it("set_state swaps state labels and closes/reopens", async () => {
     const m = mockFetch((url, init) => {
@@ -193,5 +195,85 @@ describe("github agent tools", () => {
     assert.equal(parseNextLink(null), null);
     assert.equal(validBranch("symphony/r-1"), true);
     assert.equal(validBranch("-x"), false);
+  });
+});
+
+describe("github multi-repo", () => {
+  const multi = (fn: typeof fetch, extra: Record<string, unknown> = {}) =>
+    new GitHubAdapter({
+      provider: parseGitHubProvider(
+        {
+          owner: "o",
+          repositories: ["r", { repository: "acme/web", identifier_prefix: "WEB", protected_branches: ["release"] }],
+          token: "t",
+          ...extra,
+        },
+        {},
+      ),
+      activeStates: ["Todo"],
+      terminalStates: ["Closed"],
+      log: quietLogger(),
+      fetchFn: fn,
+    });
+
+  it("parses repositories and rejects duplicates / prefix collisions / mixing", () => {
+    const c = parseGitHubProvider({ owner: "o", repositories: ["r", "x/app", { repository: "y/app", identifier_prefix: "y-app" }] }, { GITHUB_TOKEN: "t" });
+    assert.deepEqual(c.repos.map((r) => [r.full_name, r.identifier_prefix]), [["o/r", "r"], ["x/app", "app"], ["y/app", "y-app"]]);
+    const bad = (p: Record<string, unknown>) =>
+      assert.throws(() => parseGitHubProvider({ token: "t", ...p }, {}), (e: TrackerError) => e.category === "invalid_tracker_config");
+    bad({ repositories: ["x/app", "y/app"] });
+    bad({ repositories: ["x/app", "X/App"] });
+    bad({ repositories: ["app"] });
+    bad({ repositories: [] });
+    bad({ repositories: ["x/a"], repository: "x/b" });
+    bad({ repositories: ["x/a"], identifier_prefix: "p" });
+    bad({ repositories: [42] });
+  });
+
+  it("fetches candidates across repos with repo-scoped ids and identifiers", async () => {
+    const m = mockFetch((url) => {
+      if (url.pathname === "/repos/o/r/issues") return { body: [raw(1)] };
+      if (url.pathname === "/repos/acme/web/issues") return { body: [raw(1, { repository_url: "https://api.github.com/repos/acme/web" })] };
+      if (url.pathname === "/repos/acme/web/issues/1") return { body: raw(1, { repository_url: "https://api.github.com/repos/acme/web" }) };
+      return undefined;
+    });
+    const a = multi(m.fn);
+    const issues = await a.fetchIssuesByStates(["Todo"]);
+    assert.deepEqual(issues.map((i) => [i.id, i.identifier]), [["o/r#1", "r-1"], ["acme/web#1", "WEB-1"]]);
+    assert.equal((issues[1].native_ref as Record<string, unknown>).clone_url, "https://github.com/acme/web.git");
+    assert.deepEqual(a.issueEnvironment(issues[1]), {
+      SYMPHONY_ISSUE_REPO: "acme/web",
+      SYMPHONY_ISSUE_REPO_OWNER: "acme",
+      SYMPHONY_ISSUE_REPO_NAME: "web",
+      SYMPHONY_ISSUE_NUMBER: "1",
+      SYMPHONY_REPO_URL: "https://github.com/acme/web.git",
+    });
+    const byId = await a.fetchIssuesByIds(["ACME/web#1"]);
+    assert.equal(byId[0].identifier, "WEB-1");
+  });
+
+  it("fails the whole fetch when one repository fails", async () => {
+    const m = mockFetch((url) => (url.pathname === "/repos/o/r/issues" ? { body: [raw(1)] } : { status: 500, body: { message: "x" } }));
+    await assert.rejects(multi(m.fn).fetchIssuesByStates(["Todo"]), (e: TrackerError) => e.category === "tracker_status");
+  });
+
+  it("tools act on the issue's own repository and its protected branches", async () => {
+    const m = mockFetch((url) => {
+      if (url.pathname === "/repos/acme/web") return { body: { clone_url: "https://github.com/acme/web.git", default_branch: "main" } };
+      return { body: {} };
+    });
+    const a = multi(m.fn);
+    const issue = mkIssue({ id: "acme/web#3", native_ref: { owner: "acme", repo: "web", number: 3 } });
+    await a.executeAgentTool("github_issue_comment", { body: "hi" }, { issue, workspacePath: "/tmp/x" });
+    assert.ok(m.calls.some((c) => c.method === "POST" && new URL(c.url).pathname === "/repos/acme/web/issues/3/comments"));
+    const r = await a.executeAgentTool("github_git_push", { branch: "release" }, { issue, workspacePath: "/tmp/x" });
+    assert.equal(r.ok === false && r.error.code, "forbidden");
+    const stray = mkIssue({ id: "z/z#1", native_ref: { owner: "z", repo: "z", number: 1 } });
+    const s = await a.executeAgentTool("github_issue_comment", { body: "x" }, { issue: stray, workspacePath: "/tmp/x" });
+    assert.equal(s.ok === false && s.error.code, "invalid_context");
+  });
+
+  it("derives GHES web url", () => {
+    assert.equal(parseGitHubProvider({ repository: "a/b", token: "t", api_url: "https://ghe.example/api/v3" }, {}).web_url, "https://ghe.example");
   });
 });

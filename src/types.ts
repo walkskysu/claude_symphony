@@ -61,7 +61,16 @@ export interface ToolSpec {
   mutates: boolean;
 }
 
-export type ToolResult = { ok: true; output: unknown } | { ok: false; error: { code: string; message: string } };
+/** Image returned to the model alongside a tool's JSON output (MCP `image` content). */
+export interface ToolImage {
+  mimeType: string;
+  /** base64 */
+  data: string;
+}
+
+export type ToolResult =
+  | { ok: true; output: unknown; images?: ToolImage[] }
+  | { ok: false; error: { code: string; message: string } };
 
 export interface ToolContext {
   issue: Issue;
@@ -76,5 +85,7 @@ export interface TrackerAdapter {
   fetchIssuesByIds(issueIds: string[]): Promise<Issue[]>;
   agentToolSpecs?(): ToolSpec[];
   secretEnvironmentNames?(): string[];
+  /** Extra `SYMPHONY_*` env for hooks and the agent process (e.g. the issue's repository). */
+  issueEnvironment?(issue: Issue): Record<string, string>;
   executeAgentTool?(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult>;
 }

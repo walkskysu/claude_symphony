@@ -18,7 +18,7 @@ const mode = process.env.FAKE_MODE ?? "ok";
 const record = (o) => {
   if (process.env.FAKE_RECORD) fs.appendFileSync(process.env.FAKE_RECORD, JSON.stringify(o) + "\n");
 };
-record({ kind: "start", argv, cwd: process.cwd(), env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? null, SYMPHONY_ISSUE_IDENTIFIER: process.env.SYMPHONY_ISSUE_IDENTIFIER } });
+record({ kind: "start", argv, cwd: process.cwd(), env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? null, SYMPHONY_ISSUE_IDENTIFIER: process.env.SYMPHONY_ISSUE_IDENTIFIER, SYMPHONY_ISSUE_REPO: process.env.SYMPHONY_ISSUE_REPO ?? null } });
 process.stderr.write("fake-claude diagnostics on stderr\n");
 
 if (mode === "exit") process.exit(3);

@@ -40,8 +40,9 @@ export function buildChildEnv(base: NodeJS.ProcessEnv, secretNames: string[], ex
   return { ...env, ...extra };
 }
 
-function issueEnv(issue: Issue, ws: string): Record<string, string> {
+function issueEnv(issue: Issue, ws: string, tracker?: TrackerAdapter): Record<string, string> {
   return {
+    ...(tracker?.issueEnvironment?.(issue) ?? {}),
     SYMPHONY_ISSUE_ID: issue.id,
     SYMPHONY_ISSUE_IDENTIFIER: issue.identifier,
     SYMPHONY_ISSUE_URL: issue.url ?? "",
@@ -55,11 +56,11 @@ export async function runAgentAttempt(ctx: AttemptContext): Promise<AttemptOutco
   const log = ctx.log;
 
   // 1. Workspace
-  const ws = await workspaces.createForIssue(issue.identifier, issueEnv(issue, workspaces.pathFor(issue.identifier)));
+  const ws = await workspaces.createForIssue(issue.identifier, issueEnv(issue, workspaces.pathFor(issue.identifier), ctx.tracker));
   ctx.onWorkspace(ws.path);
   if (signal.aborted) throw new SymphonyError("canceled_by_reconciliation", "canceled before start");
 
-  const hookEnv = issueEnv(issue, ws.path);
+  const hookEnv = issueEnv(issue, ws.path, ctx.tracker);
   let session: ClaudeSession | null = null;
   let bridgeToken: string | null = null;
   try {
@@ -109,7 +110,7 @@ export async function runAgentAttempt(ctx: AttemptContext): Promise<AttemptOutco
     session = new ClaudeSession({
       cfg: cfg.claude,
       cwd,
-      env: buildChildEnv(process.env, secretNames, issueEnv(issue, cwd)),
+      env: buildChildEnv(process.env, secretNames, issueEnv(issue, cwd, ctx.tracker)),
       title: `${issue.identifier}: ${issue.title}`,
       mcpConfigJson: mcpJson,
       logFile,

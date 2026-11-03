@@ -10,14 +10,19 @@
 ## 快速开始
 
 ```bash
-npm install && npm run build
-cp WORKFLOW.example.md /path/to/your-repo/WORKFLOW.md   # 按需修改
-export GITHUB_TOKEN=ghp_xxx                              # 需要 issues / pull_requests / contents 写权限
+cp WORKFLOW.example.md WORKFLOW.md          # 修改 tracker.provider.repositories 等
+echo 'GITHUB_TOKEN=ghp_xxx' > .env          # 需要 issues / pull_requests / contents 写权限；.env 已被 git 忽略
 
-node dist/cli.js check /path/to/your-repo/WORKFLOW.md    # 校验配置 + 列出候选 issue
-node dist/cli.js /path/to/your-repo/WORKFLOW.md --port 4400
-# 浏览器打开 http://127.0.0.1:4400/  查看仪表盘
+scripts/symphony.sh check                   # 校验配置 + 列出候选 issue
+scripts/symphony.sh start                   # 后台启动（先 check，失败则不启动）
+scripts/symphony.sh status | logs | stop | restart
+scripts/symphony.sh run                     # 前台运行，Ctrl-C 退出
+# 浏览器打开 http://127.0.0.1:<server.port>/ 查看仪表盘
 ```
+
+启动脚本 `scripts/symphony.sh` 会：检查 Node ≥ 22；缺少依赖时 `npm ci`；`dist/` 不存在或源码更新时自动构建；加载 `.env`；后台模式把 pid 写到 `.symphony/symphony.pid`、输出追加到 `.symphony/symphony.out`。用法 `scripts/symphony.sh start [WORKFLOW.md] [-- 额外 CLI 参数]`，例如 `scripts/symphony.sh start -- --port 4400`。可用环境变量：`SYMPHONY_ENV_FILE`、`SYMPHONY_WORKFLOW`、`SYMPHONY_STATE_DIR`、`SYMPHONY_PORT`。
+
+也可以直接调用 CLI：`npm install && npm run build && node dist/cli.js WORKFLOW.md --port 4400`。
 
 开发时可以直接运行 TS 源码（Node ≥ 22.18 原生支持类型擦除）：`node src/cli.ts WORKFLOW.md`。
 
@@ -99,7 +104,8 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
 
   | 键 | 默认 | 说明 |
   |---|---|---|
-  | `owner` + `repo`，或 `repository: owner/repo` | 必填 | 调度范围 = 单个仓库 |
+  | `repositories` | 三选一必填 | **多仓库**：列表项为 `owner/repo`、裸 `repo`（使用顶层 `owner`），或 `{repository, owner?, identifier_prefix?, protected_branches?}`。调度范围 = 所有列出的仓库 |
+  | `repository: owner/repo`，或 `owner` + `repo` | 三选一必填 | 单仓库写法（与 `repositories` 互斥） |
   | `token` | 省略时依次读取 `$GITHUB_TOKEN`、`$GH_TOKEN` | **密钥**，支持 `$VAR`；解析为空视为缺失 |
   | `api_url` | `https://api.github.com` | GHES：`https://host/api/v3` |
   | `state_label_prefix` | `status:` | 状态标签前缀 |
@@ -107,18 +113,22 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
   | `assignee` | 无 | 设置后只有指派给该 login 的 issue 才 `dispatchable` |
   | `blocking_labels` | `[]` | 含这些标签的 issue `dispatchable=false` |
   | `priority_label_prefix` | `priority:` | `priority:1`/`priority:p1` → `priority=1` |
-  | `identifier_prefix` | 仓库名 | `identifier = <prefix>-<number>` |
+  | `identifier_prefix` | 仓库名 | `identifier = <prefix>-<number>`；多仓库时在每个条目上设置，所有仓库的前缀（忽略大小写）必须唯一，否则报 `invalid_tracker_config` |
+  | `web_url` | 由 `api_url` 推导 | 生成 clone URL 用；github.com → `https://github.com`，GHES 去掉 `/api/v3` |
   | `closed_lookback_days` | `14` | 拉取 closed 状态时只看最近 N 天更新过的 |
   | `page_size` / `max_pages` | `100` / `50` | 分页；超过 `max_pages` 报 `tracker_pagination` |
   | `request_timeout_ms` | `30000` | |
   | `allow_force_push` | `false` | 是否允许 `github_git_push` 强推 |
-  | `protected_branches` | `[main, master]` | 外加仓库默认分支，`github_git_push` 一律拒绝 |
+  | `protected_branches` | `[main, master]` | 外加仓库默认分支，`github_git_push` 一律拒绝；可在每个仓库条目上覆盖 |
   | `allowed_states` | 不限制 | 设置后 `github_issue_set_state` 只接受这些 + active/terminal/open/closed |
+  | `attachment_max_bytes` / `attachment_max_count` | `10485760` / `20` | `github_issue_attachments` 单张图片大小上限 / 每次调用最多下载张数 |
 
 - **默认状态**：`active_states = [Todo, In Progress]`，`terminal_states = [Closed, Done]`。
 - **状态模型**：GitHub issue 只有 open/closed，因此工作流状态由标签承载：`status:Todo`、`status:In Progress`、`status:Human Review`……closed issue 的状态恒为 `closed_state`；open 且无状态标签为 `open_state`。状态名保留标签中的原始拼写，比较时 trim + lowercase。
-- **查询与分页**：每个非 open/closed 状态发一次 `GET /repos/{o}/{r}/issues?state=open&labels=<prefix><state>`；`open_state` 拉全部 open issue；`closed_state` 拉 `since=now-closed_lookback_days` 的 closed issue。按 `Link: rel="next"` 顺序翻页并按 id 去重。空状态列表/空 id 列表不发请求。
-- **ID 映射**：`id` = issue number（字符串，仓库范围内稳定）；`native_ref = {provider, owner, repo, number, node_id, database_id, assignees, state_labels}`（均为非密钥）。`fetch_issues_by_ids` 对每个 id 调 `GET /issues/{n}`（并发 8）；404/410、已转移到其他仓库、或其实是 PR 的条目视为“不可见”而省略。
+- **多仓库**：按配置顺序对每个仓库执行下面的查询，合并结果交给 orchestrator 统一排序和限流（`max_concurrent_agents` 等是全局的）。任一仓库查询失败则整次拉取失败、本 tick 不派发（规范 §11.4：不基于不完整视图调度）。
+- **查询与分页**：每个仓库、每个非 open/closed 状态发一次 `GET /repos/{o}/{r}/issues?state=open&labels=<prefix><state>`；`open_state` 拉全部 open issue；`closed_state` 拉 `since=now-closed_lookback_days` 的 closed issue。按 `Link: rel="next"` 顺序翻页并按 id 去重。空状态列表/空 id 列表不发请求。
+- **ID 映射**：`id` = `owner/repo#number`（跨仓库唯一且稳定）；`identifier` = `<identifier_prefix>-<number>`；`native_ref = {provider, owner, repo, full_name, clone_url, number, node_id, database_id, assignees, state_labels}`（均为非密钥，模板中可用 `{{ issue.native_ref.full_name }}`）。`fetch_issues_by_ids` 解析 id 后对相应仓库调 `GET /issues/{n}`（并发 8）；不属于已配置仓库的 id、404/410、已转移到其他仓库、或其实是 PR 的条目视为“不可见”而省略。
+- **提供给 hook 和代理的环境变量**：`SYMPHONY_ISSUE_REPO`（`owner/repo`）、`SYMPHONY_ISSUE_REPO_OWNER`、`SYMPHONY_ISSUE_REPO_NAME`、`SYMPHONY_ISSUE_NUMBER`、`SYMPHONY_REPO_URL`（clone URL），另有通用的 `SYMPHONY_ISSUE_ID`、`SYMPHONY_ISSUE_IDENTIFIER`、`SYMPHONY_ISSUE_URL`、`SYMPHONY_WORKSPACE`。一份 `after_create` 即可为不同仓库的 issue clone 正确的仓库（见 `WORKFLOW.example.md`）。
 - **规范化**：labels trim + 小写 + 去重；`created_at/updated_at` 解析为 RFC 3339；`branch_name = null`；`blocked_by = []`（GitHub 依赖关系不做推断）；`assignee_id` = 第一个 assignee login。
 - **`dispatchable`**：`false` 当且仅当：同时带多个不同状态标签（歧义，需人工处理）、配置了 `assignee` 但未指派给它、或带有 `blocking_labels`。
 - **畸形记录**：缺少 number/title/state 的记录在状态列表查询中被省略并记 warn 日志；在 id 刷新中直接报 `tracker_response` 错误。Pull request 永远不在范围内。
@@ -131,16 +141,27 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
 | 工具 | 会修改跟踪器 | 作用域 | 输入 |
 |---|---|---|---|
 | `github_issue_read` | 否 | 当前 issue | `{include_comments?: boolean}` |
+| `github_issue_attachments` | 否 | 当前 issue | `{include_body?, include_comments?, comment_ids?: number[], max_images?, inline?}`：下载正文/评论中的图片（见下） |
 | `github_issue_comment` | 是 | 当前 issue | `{body: string}` |
 | `github_issue_set_state` | 是 | 当前 issue | `{state: string, close_reason?: "completed"\|"not_planned"}`：移除其他状态标签并添加 `<prefix><state>`；`closed_state` 会关闭 issue，其它状态会在需要时重新打开 |
 | `github_issue_labels` | 是 | 当前 issue | `{add?: string[], remove?: string[]}`，不能修改状态标签 |
-| `github_git_push` | 是（仓库） | 配置的仓库 | `{branch, force?}`：在宿主侧用 token 推送工作区 `HEAD`；拒绝受保护/默认分支；禁用仓库 git hooks；凭据只放在宿主侧 git 进程的 `GIT_CONFIG_*` 环境变量中 |
-| `github_pr_create` | 是（仓库） | 配置的仓库 | `{title, head, base?, body?, draft?, closes_issue?=true}`，默认在 body 末尾追加 `Closes #<n>` |
-| `github_pr_list` | 否 | 配置的仓库 | `{head?, state?}` |
+| `github_git_push` | 是（仓库） | 当前 issue 所在仓库 | `{branch, force?}`：在宿主侧用 token 推送工作区 `HEAD`；拒绝受保护/默认分支；禁用仓库 git hooks；凭据只放在宿主侧 git 进程的 `GIT_CONFIG_*` 环境变量中 |
+| `github_pr_create` | 是（仓库） | 当前 issue 所在仓库 | `{title, head, base?, body?, draft?, closes_issue?=true}`，默认在 body 末尾追加 `Closes #<n>` |
+| `github_pr_list` | 否 | 当前 issue 所在仓库 | `{head?, state?}` |
 
 结果：成功为 `{ok: true, result}`；失败为 `{ok: false, error: {code, message}}` 且 MCP `isError: true`。错误码：`invalid_arguments`、`forbidden`、`unsupported_tool`、`git_push_failed`、`tool_error`，以及上面的 tracker 错误类别。未知工具名返回结构化失败，会话继续。工具不做幂等去重（例如重复调用 `github_issue_comment` 会发两条评论；`github_pr_create` 对已存在的 PR 会返回 GitHub 的 422），提示词中应让代理先 `github_pr_list`。GitHub 限流同读接口。
 
 每个代理会话有独立的随机 bearer token，绑定到该会话启动时的 adapter 快照与当前 issue；配置重载只影响之后的会话。
+
+### 读取 issue 中的图片（`github_issue_attachments`）
+
+代理无法自己下载 issue 里的截图（私有仓库附件需要凭据，而代理拿不到 token），所以由 Symphony 在宿主侧完成：
+
+1. 以 `application/vnd.github.full+json` 读取正文和评论，优先从渲染后的 `body_html` 中取 `<img src>` —— 私有仓库在这里给出短时有效的签名 URL，无需浏览器登录；没有 HTML 时回退解析 Markdown（`![](…)`、`<img>`）。
+2. **只下载 GitHub 自己的地址**：`github.com` 上的附件路径（`/user-attachments/…`、`/<owner>/<repo>/assets/…`）和 `*.githubusercontent.com`（GHES：`web_url` 的主机及其子域名）。每一跳重定向都重新校验，不会被引到任意网址或内网地址；token 只发给 GitHub 网页主机本身，不发给 CDN。
+3. 边下载边检查大小；按文件头判断真实类型（PNG/JPEG/GIF/WebP 可内联，SVG/BMP 只保存），登录页等 HTML 会被拒绝。
+4. 支持的图片以 MCP `image` 内容块直接返回给 Claude（单张 ≤ 3.75 MB、单次合计 ≤ 15 MB），同时全部保存到工作区 `.symphony/attachments/<issue|comment-ID>-<n>.<ext>`，以后的轮次可以用 Read 工具重新打开。`.symphony/` 里会写入 `.gitignore`（内容为 `*`），避免被提交；如果 `.symphony` 是指向工作区外的符号链接则拒绝写入。
+5. 返回的 JSON 列出每张图片的来源、作者、alt、路径或错误原因；URL 去掉了查询串（不暴露签名）。`github_issue_read` 发现图片时会附带 `images_referenced` 提示。
 
 ## 信任与安全策略（规范 §10.5、§15 要求说明）
 
