@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.symphony/
+.env
+.env.*
+!.env.example
