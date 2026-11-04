@@ -9,7 +9,7 @@ import path from "node:path";
 import { TrackerError } from "../errors.ts";
 import type { Logger } from "../log.ts";
 import type { Issue, ToolContext, ToolImage, ToolResult, ToolSpec, TrackerAdapter } from "../types.ts";
-import { isPlainObject, normState, resolveVar, varRef } from "../util.ts";
+import { isPlainObject, normState, resolveVar, sleep, varRef } from "../util.ts";
 import {
   ATTACHMENTS_REL_DIR,
   AttachmentError,
@@ -256,6 +256,7 @@ export class GitHubAdapter implements TrackerAdapter {
   private readonly activeStates: string[];
   private readonly terminalStates: string[];
   private readonly requiredLabels: string[];
+  private readonly networkRetryDelaysMs: number[];
   private readonly repoInfo = new Map<string, { clone_url: string; default_branch: string }>();
 
   constructor(opts: {
@@ -265,6 +266,8 @@ export class GitHubAdapter implements TrackerAdapter {
     log: Logger;
     fetchFn?: FetchFn;
     requiredLabels?: string[];
+    /** Back-off before each retry of a GET that failed at the network level (default 1s, 3s). */
+    networkRetryDelaysMs?: number[];
   }) {
     this.cfg = opts.provider;
     this.log = opts.log.child({ tracker: "github", repos: opts.provider.repos.map((r) => r.full_name).join(",") });
@@ -272,6 +275,7 @@ export class GitHubAdapter implements TrackerAdapter {
     this.activeStates = opts.activeStates;
     this.terminalStates = opts.terminalStates;
     this.requiredLabels = opts.requiredLabels ?? [];
+    this.networkRetryDelaysMs = opts.networkRetryDelaysMs ?? [1000, 3000];
   }
 
   // ---- HTTP -------------------------------------------------------------------------------------
@@ -312,25 +316,46 @@ export class GitHubAdapter implements TrackerAdapter {
     accept = "application/vnd.github+json",
   ): Promise<GhResponse> {
     const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${this.cfg.api_url}${pathOrUrl}`;
-    let res: Response;
-    try {
-      res = await this.fetchFn(url, {
-        method,
-        headers: {
-          Accept: accept,
-          Authorization: `Bearer ${this.cfg.token}`,
-          "X-GitHub-Api-Version": "2022-11-28",
-          "User-Agent": "claude-symphony",
-          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(this.cfg.request_timeout_ms),
-        redirect: "follow",
-      });
-    } catch (err) {
-      throw new TrackerError("tracker_request", `GitHub request ${method} ${url} failed: ${(err as Error).message}`, {
-        retryable: true,
-      });
+    // Only idempotent reads are retried: a mutation whose response was lost may already have
+    // been applied, and repeating it (comment, PR, label change) would not be safe.
+    const delays = method === "GET" ? this.networkRetryDelaysMs : [];
+    let res: Response | undefined;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        res = await this.fetchFn(url, {
+          method,
+          headers: {
+            Accept: accept,
+            Authorization: `Bearer ${this.cfg.token}`,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "claude-symphony",
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(this.cfg.request_timeout_ms),
+          redirect: "follow",
+        });
+        break;
+      } catch (err) {
+        const detail = describeFetchError(err);
+        if (attempt < delays.length) {
+          this.log.warn("GitHub request failed at network level; retrying", {
+            method,
+            url,
+            error: detail,
+            attempt: attempt + 1,
+            delay_ms: delays[attempt],
+          });
+          await sleep(delays[attempt]);
+          continue;
+        }
+        const tries = attempt + 1;
+        throw new TrackerError(
+          "tracker_request",
+          `GitHub request ${method} ${url} failed${tries > 1 ? ` after ${tries} attempts` : ""}: ${detail}`,
+          { retryable: true },
+        );
+      }
     }
     let parsed: unknown = null;
     const text = await res.text().catch(() => "");
@@ -1121,4 +1146,32 @@ function runGit(args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Prom
       resolve({ code, output });
     });
   });
+}
+
+/**
+ * Human-readable cause of a failed `fetch`. Node's fetch reports every network problem as the bare
+ * "fetch failed"; the useful part (ECONNRESET, ENOTFOUND, ETIMEDOUT, TLS errors...) is in `cause`.
+ */
+export function describeFetchError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  if (err.name === "TimeoutError") return `timed out (${err.message})`;
+  const parts = [err.message];
+  const seen = new Set<unknown>([err]);
+  let cause: unknown = (err as { cause?: unknown }).cause;
+  while (cause && !seen.has(cause)) {
+    seen.add(cause);
+    if (cause instanceof AggregateError && cause.errors.length) {
+      parts.push(cause.errors.map((e) => causeText(e)).join("; "));
+      break;
+    }
+    parts.push(causeText(cause));
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return [...new Set(parts.filter(Boolean))].join(": ");
+}
+
+function causeText(c: unknown): string {
+  if (!(c instanceof Error)) return String(c);
+  const code = (c as NodeJS.ErrnoException).code;
+  return code && !c.message.includes(code) ? `${code} ${c.message}` : c.message;
 }

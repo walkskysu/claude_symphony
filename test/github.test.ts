@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { TrackerError } from "../src/errors.ts";
-import { GitHubAdapter, parseGitHubProvider, parseNextLink, validBranch } from "../src/tracker/github.ts";
+import { describeFetchError, GitHubAdapter, parseGitHubProvider, parseNextLink, validBranch } from "../src/tracker/github.ts";
 import { mkIssue, quietLogger } from "./helpers.ts";
 
 type Route = (url: URL, init: RequestInit) => { status?: number; body?: unknown; headers?: Record<string, string> } | undefined;
@@ -41,7 +41,14 @@ function adapter(fn: typeof fetch, provider: Record<string, unknown> = {}) {
     terminalStates: ["Closed", "Done"],
     log: quietLogger(),
     fetchFn: fn,
+    networkRetryDelaysMs: [0, 0],
   });
+}
+
+/** Node-style fetch failure: bare "fetch failed" with the real reason in `cause`. */
+function netError(code: string): Error {
+  const cause = Object.assign(new Error(`read ${code}`), { code });
+  return new TypeError("fetch failed", { cause });
 }
 
 describe("github provider config", () => {
@@ -137,6 +144,58 @@ describe("github adapter reads", () => {
     const a = adapter(mockFetch(() => undefined).fn);
     assert.ok(a.secretEnvironmentNames().includes("GITHUB_TOKEN"));
     assert.ok(a.secretEnvironmentNames().includes("GH_T"));
+  });
+});
+
+describe("github network failures", () => {
+  it("describes the underlying cause of a fetch failure", () => {
+    assert.equal(describeFetchError(netError("ECONNRESET")), "fetch failed: read ECONNRESET");
+    const agg = new TypeError("fetch failed", {
+      cause: new AggregateError([Object.assign(new Error("connect ETIMEDOUT 1.2.3.4:443"), { code: "ETIMEDOUT" }), new Error("other")]),
+    });
+    assert.equal(describeFetchError(agg), "fetch failed: connect ETIMEDOUT 1.2.3.4:443; other");
+    const dns = new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo failed"), { code: "ENOTFOUND" }) });
+    assert.equal(describeFetchError(dns), "fetch failed: ENOTFOUND getaddrinfo failed");
+    assert.equal(describeFetchError(new DOMException("The operation was aborted due to timeout", "TimeoutError")), "timed out (The operation was aborted due to timeout)");
+  });
+
+  it("retries GETs on network errors and succeeds once the network is back", async () => {
+    let failures = 2;
+    const m = mockFetch(() => ({ body: [raw(1)] }));
+    const fn = (async (input: string | URL, init?: RequestInit) => {
+      if (failures-- > 0) throw netError("ECONNRESET");
+      return m.fn(input, init);
+    }) as typeof fetch;
+    const issues = await adapter(fn).fetchIssuesByStates(["Todo"]);
+    assert.deepEqual(issues.map((i) => i.id), ["o/r#1"]);
+  });
+
+  it("gives up after the retries with the cause and attempt count in the error", async () => {
+    let calls = 0;
+    const fn = (async () => {
+      calls++;
+      throw netError("ECONNRESET");
+    }) as unknown as typeof fetch;
+    await assert.rejects(adapter(fn).fetchIssuesByIds(["o/r#5"]), (e: TrackerError) => {
+      assert.equal(e.category, "tracker_request");
+      assert.match(e.message, /failed after 3 attempts: fetch failed: read ECONNRESET/);
+      return true;
+    });
+    assert.equal(calls, 3);
+  });
+
+  it("never retries mutations (the request may already have been applied)", async () => {
+    let calls = 0;
+    const fn = (async () => {
+      calls++;
+      throw netError("ECONNRESET");
+    }) as unknown as typeof fetch;
+    const a = adapter(fn);
+    await assert.rejects(a.request("POST", "/repos/o/r/issues/1/comments", { body: "x" }), (e: TrackerError) => {
+      assert.match(e.message, /^GitHub request POST \S+ failed: fetch failed: read ECONNRESET$/);
+      return true;
+    });
+    assert.equal(calls, 1);
   });
 });
 

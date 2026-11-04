@@ -212,6 +212,7 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
 ## 实现定义的行为
 
 - 工作区位置存在非目录文件时：失败，不删除。
+- **GitHub 网络错误**：只读的 GET 请求在网络层失败（连接重置、DNS、超时等，非 HTTP 错误状态）时，间隔 1s、3s 自动重试 2 次，每次重试记一条 warn 日志；写操作（评论、改标签、建 PR 等）不重试，因为请求可能已经生效。错误信息包含底层原因（如 `fetch failed: read ECONNRESET`、`getaddrinfo ENOTFOUND ...`）而不只是 `fetch failed`。
 - `after_create` 失败：删除刚创建的目录。复用的工作区不会被破坏性重置。
 - 协调终止（terminal / 非活跃 / 不可路由 / 不可见）会释放 claim，不重试；只有 terminal 会清理工作区。停滞终止按指数退避重试。
 - 重试时如果配置当前无效，会以退避重新排队，而不是释放 claim。
