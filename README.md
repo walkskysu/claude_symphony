@@ -10,31 +10,33 @@
 ## 快速开始
 
 ```bash
-cp WORKFLOW.example.md WORKFLOW.md          # 修改 tracker.provider.repositories 等
+cp symphony.example.yml symphony.yml        # 修改 tracker.provider.repositories 等（symphony.yml 已被 git 忽略）
 echo 'GITHUB_TOKEN=ghp_xxx' > .env          # 需要 issues / pull_requests / contents 写权限；.env 已被 git 忽略
 
-scripts/symphony.sh check                   # 校验配置 + 列出候选 issue
+scripts/symphony.sh check                   # 校验配置 + 列出候选 issue + 报告缺失的标签
+scripts/symphony.sh labels                  # （可选）立即在各仓库创建缺失的工作流标签
 scripts/symphony.sh start                   # 后台启动（先 check，失败则不启动）
 scripts/symphony.sh status | logs | stop | restart
 scripts/symphony.sh run                     # 前台运行，Ctrl-C 退出
 # 浏览器打开 http://127.0.0.1:<server.port>/ 查看仪表盘
 ```
 
-启动脚本 `scripts/symphony.sh` 会：检查 Node ≥ 22；缺少依赖时 `npm ci`；`dist/` 不存在或源码更新时自动构建；加载 `.env`；后台模式把 pid 写到 `.symphony/symphony.pid`、输出追加到 `.symphony/symphony.out`。用法 `scripts/symphony.sh start [WORKFLOW.md] [-- 额外 CLI 参数]`，例如 `scripts/symphony.sh start -- --port 4400`。可用环境变量：`SYMPHONY_ENV_FILE`、`SYMPHONY_WORKFLOW`、`SYMPHONY_STATE_DIR`、`SYMPHONY_PORT`。
+启动脚本 `scripts/symphony.sh` 会：检查 Node ≥ 22；缺少依赖时 `npm ci`；`dist/` 不存在或源码更新时自动构建；加载 `.env`；后台模式把 pid 写到 `.symphony/symphony.pid`、输出追加到 `.symphony/symphony.out`。用法 `scripts/symphony.sh start [配置文件] [-- 额外 CLI 参数]`；不给配置文件时固定使用项目目录下的 `symphony.yml`。示例：`scripts/symphony.sh start -- --port 4400`。可用环境变量：`SYMPHONY_ENV_FILE`、`SYMPHONY_WORKFLOW`、`SYMPHONY_STATE_DIR`、`SYMPHONY_PORT`。
 
-也可以直接调用 CLI：`npm install && npm run build && node dist/cli.js WORKFLOW.md --port 4400`。
+也可以直接调用 CLI：`npm install && npm run build && node dist/cli.js symphony.yml --port 4400`。
 
-开发时可以直接运行 TS 源码（Node ≥ 22.18 原生支持类型擦除）：`node src/cli.ts WORKFLOW.md`。
+开发时可以直接运行 TS 源码（Node ≥ 22.18 原生支持类型擦除）：`node src/cli.ts symphony.yml`。
 
-在 GitHub 上给 issue 打上 `agent` 和 `status:Todo` 标签即可被调度。
+在 GitHub 上给 issue 打上 `agent` 和 `status:Todo` 标签即可被调度（标签不存在时服务启动会自动创建，见下文“标签”）。
 
 ## CLI
 
 ```
-claude-symphony [check] [path-to-WORKFLOW.md] [--port N] [--host H] [--log-file F] [--log-level L]
+claude-symphony [check|labels] [config-file] [--port N] [--host H] [--log-file F] [--log-level L]
 ```
 
-- 不给路径时使用 `./WORKFLOW.md`；文件不存在或启动校验失败时以非 0 退出。
+- 不给路径时固定使用当前目录的 `./symphony.yml`（不查找其他文件名）；文件不存在或启动校验失败时以非 0 退出。
+- `check`：校验配置、列出候选 issue、报告每个仓库缺失的标签（只读）。`labels`：创建缺失的标签后退出。
 - `--port` 覆盖 `server.port`，`0` 表示随机端口；默认只绑定 `127.0.0.1`。
 - `SIGINT`/`SIGTERM` 优雅退出（停止所有代理、执行 `after_run` hook），退出码 0。
 
@@ -43,7 +45,7 @@ claude-symphony [check] [path-to-WORKFLOW.md] [--port N] [--host H] [--log-file 
 | 规范组件 | 实现 |
 |---|---|
 | Workflow Loader + 动态重载 | `src/workflow.ts`（目录 watch + 指纹轮询兜底；每个 tick 前再防御性检查一次） |
-| Config Layer | `src/config.ts`（默认值、`$VAR`、`~`、相对 `WORKFLOW.md` 解析） |
+| Config Layer | `src/config.ts`（默认值、`$VAR`、`~`、相对配置文件解析） |
 | Issue Tracker Adapter | `src/tracker/github.ts`，注册表 `src/tracker/index.ts` |
 | Orchestrator | `src/orchestrator.ts`（单一权威内存状态、claim、重试队列、协调、停滞检测） |
 | Workspace Manager | `src/workspace.ts`（清洗 key + 64 位哈希后缀、根目录约束、4 个 hook、超时杀进程组） |
@@ -64,7 +66,26 @@ claude-symphony [check] [path-to-WORKFLOW.md] [--port N] [--host H] [--log-file 
 - Token 统计：每个 `result.usage` 累加为线程绝对总量（input = input + cache_creation + cache_read），orchestrator 按“与上次上报的差值”累计，避免重复计数；`rate_limit_event` 记录为最新限流快照；`total_cost_usd` 额外统计为 `cost_usd`。
 - 发出的事件：`session_started`、`startup_failed`、`turn_completed`、`turn_failed`、`turn_input_required`、`approval_auto_approved`、`unsupported_tool_call`、`tool_call_completed`、`tool_call_failed`、`notification`、`other_message`、`malformed`。
 
-## WORKFLOW.md 配置参考
+## 配置文件
+
+配置文件固定为 **`symphony.yml`**（显式传路径时也可用 `.yaml` / `.json`）：整个文件就是配置，提示词模板放在 `prompt:`（YAML 多行字符串），或用 `prompt_file: prompts/default.md` 指向单独的文件（相对配置文件解析，支持 `~` / `$VAR`）。两者不能同时设置。修改配置文件或提示词文件都会自动热重载。完整示例见 `symphony.example.yml`。
+
+```yaml
+tracker:
+  kind: github
+  provider:
+    owner: walkskysu
+    repositories: [llm_media_library]
+polling:
+  interval_ms: 30000
+prompt_file: prompts/default.md      # 或 prompt: |  ...
+```
+
+仓库自带的默认提示词在 **`prompts/default.md`**，`symphony.example.yml` 通过 `prompt_file: prompts/default.md` 引用它。需要按仓库/团队定制时，复制一份（如 `prompts/my-team.md`）并修改 `prompt_file` 即可。
+
+为兼容 Symphony 规范，显式传入 **`WORKFLOW.md`**（YAML front matter + Markdown 提示词正文）仍然可用，配置键完全相同，按扩展名区分（`.yml/.yaml/.json` 以外都按 WORKFLOW.md 解析）。
+
+### 配置参考
 
 核心字段与规范 §6.4 一致：`tracker.*`、`polling.interval_ms`、`workspace.root`、`hooks.*`、`agent.*`。差异与扩展：
 
@@ -122,13 +143,18 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
   | `protected_branches` | `[main, master]` | 外加仓库默认分支，`github_git_push` 一律拒绝；可在每个仓库条目上覆盖 |
   | `allowed_states` | 不限制 | 设置后 `github_issue_set_state` 只接受这些 + active/terminal/open/closed |
   | `attachment_max_bytes` / `attachment_max_count` | `10485760` / `20` | `github_issue_attachments` 单张图片大小上限 / 每次调用最多下载张数 |
+  | `ensure_labels` | `true` | 启动（及配置重载）时在每个仓库创建缺失的工作流标签，见下 |
 
 - **默认状态**：`active_states = [Todo, In Progress]`，`terminal_states = [Closed, Done]`。
 - **状态模型**：GitHub issue 只有 open/closed，因此工作流状态由标签承载：`status:Todo`、`status:In Progress`、`status:Human Review`……closed issue 的状态恒为 `closed_state`；open 且无状态标签为 `open_state`。状态名保留标签中的原始拼写，比较时 trim + lowercase。
 - **多仓库**：按配置顺序对每个仓库执行下面的查询，合并结果交给 orchestrator 统一排序和限流（`max_concurrent_agents` 等是全局的）。任一仓库查询失败则整次拉取失败、本 tick 不派发（规范 §11.4：不基于不完整视图调度）。
 - **查询与分页**：每个仓库、每个非 open/closed 状态发一次 `GET /repos/{o}/{r}/issues?state=open&labels=<prefix><state>`；`open_state` 拉全部 open issue；`closed_state` 拉 `since=now-closed_lookback_days` 的 closed issue。按 `Link: rel="next"` 顺序翻页并按 id 去重。空状态列表/空 id 列表不发请求。
 - **ID 映射**：`id` = `owner/repo#number`（跨仓库唯一且稳定）；`identifier` = `<identifier_prefix>-<number>`；`native_ref = {provider, owner, repo, full_name, clone_url, number, node_id, database_id, assignees, state_labels}`（均为非密钥，模板中可用 `{{ issue.native_ref.full_name }}`）。`fetch_issues_by_ids` 解析 id 后对相应仓库调 `GET /issues/{n}`（并发 8）；不属于已配置仓库的 id、404/410、已转移到其他仓库、或其实是 PR 的条目视为“不可见”而省略。
-- **提供给 hook 和代理的环境变量**：`SYMPHONY_ISSUE_REPO`（`owner/repo`）、`SYMPHONY_ISSUE_REPO_OWNER`、`SYMPHONY_ISSUE_REPO_NAME`、`SYMPHONY_ISSUE_NUMBER`、`SYMPHONY_REPO_URL`（clone URL），另有通用的 `SYMPHONY_ISSUE_ID`、`SYMPHONY_ISSUE_IDENTIFIER`、`SYMPHONY_ISSUE_URL`、`SYMPHONY_WORKSPACE`。一份 `after_create` 即可为不同仓库的 issue clone 正确的仓库（见 `WORKFLOW.example.md`）。
+- **提供给 hook 和代理的环境变量**：`SYMPHONY_ISSUE_REPO`（`owner/repo`）、`SYMPHONY_ISSUE_REPO_OWNER`、`SYMPHONY_ISSUE_REPO_NAME`、`SYMPHONY_ISSUE_NUMBER`、`SYMPHONY_REPO_URL`（clone URL），另有通用的 `SYMPHONY_ISSUE_ID`、`SYMPHONY_ISSUE_IDENTIFIER`、`SYMPHONY_ISSUE_URL`、`SYMPHONY_WORKSPACE`。一份 `after_create` 即可为不同仓库的 issue clone 正确的仓库（见 `symphony.example.yml`）。
+- **标签**：工作流依赖的标签为 active / terminal / `allowed_states` 中每个状态对应的 `<prefix><state>`（`open_state`/`closed_state` 没有标签），以及 `tracker.required_labels` 和 `blocking_labels`。新加入的仓库通常一个都没有：此时按标签查询只会返回空结果，该仓库永远不会有候选 issue，但不会报错。因此：
+  - `ensure_labels: true`（默认）时，服务启动和每次配置重载都会列出各仓库的标签，缺失的自动创建（状态标签蓝/绿/黄、`required_labels` 紫、`blocking_labels` 红）。创建失败（如 token 无权限）只记 warn 日志，不影响启动。
+  - `check` 只报告缺失的标签，不做修改；`labels` 子命令（`scripts/symphony.sh labels`）立即创建，不受 `ensure_labels` 影响。
+  - 即使标签不存在，代理通过 `github_issue_set_state` 设置状态时 GitHub 也会自动创建该标签（默认灰色）。
 - **规范化**：labels trim + 小写 + 去重；`created_at/updated_at` 解析为 RFC 3339；`branch_name = null`；`blocked_by = []`（GitHub 依赖关系不做推断）；`assignee_id` = 第一个 assignee login。
 - **`dispatchable`**：`false` 当且仅当：同时带多个不同状态标签（歧义，需人工处理）、配置了 `assignee` 但未指派给它、或带有 `blocking_labels`。
 - **畸形记录**：缺少 number/title/state 的记录在状态列表查询中被省略并记 warn 日志；在 id 刷新中直接报 `tracker_response` 错误。Pull request 永远不在范围内。
@@ -171,7 +197,7 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
 - **用户输入**：默认禁用 `AskUserQuestion`；若代理仍请求用户输入，则被拒绝并记 `turn_input_required` 事件，代理需自行继续或把阻塞原因写到 issue 里。永不等待操作员。
 - **沙箱**：不提供超出 Claude Code 自身与操作系统的沙箱。可通过 `permission_mode: acceptEdits`/`dontAsk` + `allowed_tools`、`--restricted`（`extra_args`）、或把整个服务跑在容器/专用 OS 用户里来收紧。
 - **工作区不变量**：工作区目录名只含 `[A-Za-z0-9._-]`（变化时追加 64 位哈希）；路径必须在 `workspace.root` 内（含 realpath 检查）；代理 cwd 必须等于该 issue 的工作区路径。
-- **密钥**：GitHub token 只在 Symphony 进程中使用；adapter 声明的密钥环境变量会从代理子进程环境中删除；日志不打印 token。注意：同一 OS 用户下的代理理论上仍可读取 Symphony 进程的 `/proc/<pid>/environ`，若需要强隔离请让代理以不同 OS 用户运行。不要在仓库内的 WORKFLOW.md 里写明文 token。
+- **密钥**：GitHub token 只在 Symphony 进程中使用；adapter 声明的密钥环境变量会从代理子进程环境中删除；日志不打印 token。注意：同一 OS 用户下的代理理论上仍可读取 Symphony 进程的 `/proc/<pid>/environ`，若需要强隔离请让代理以不同 OS 用户运行。不要在配置文件里写明文 token（用 `token: $GITHUB_TOKEN` + `.env`）。
 - **Hooks**：视为完全受信任的配置，继承宿主环境（包括 token），在工作区目录内用 `bash -lc` 执行，有超时并杀进程组，输出在日志中截断。不要让 hook 把凭据写进工作区。
 - **加固建议**：用 `required_labels` / `assignee` 限制哪些 issue 能被调度（防止外部人员通过开 issue 注入提示词）；为 token 使用仅限单仓库的 fine-grained PAT；设置 `max_budget_usd`。
 

@@ -277,3 +277,63 @@ describe("github multi-repo", () => {
     assert.equal(parseGitHubProvider({ repository: "a/b", token: "t", api_url: "https://ghe.example/api/v3" }, {}).web_url, "https://ghe.example");
   });
 });
+
+describe("github labels", () => {
+  const mk = (fn: typeof fetch, provider: Record<string, unknown> = {}) =>
+    new GitHubAdapter({
+      provider: parseGitHubProvider(
+        { owner: "o", repositories: ["r", "s"], token: "t", allowed_states: ["Human Review"], blocking_labels: ["blocked"], ...provider },
+        {},
+      ),
+      activeStates: ["Todo", "In Progress"],
+      terminalStates: ["Closed", "Done"],
+      log: quietLogger(),
+      fetchFn: fn,
+      requiredLabels: ["agent"],
+    });
+
+  it("derives wanted labels (no labels for open/closed pseudo-states)", () => {
+    const names = mk(mockFetch(() => undefined).fn).wantedLabels().map((l) => l.name);
+    assert.deepEqual(names, ["status:Todo", "status:In Progress", "status:Done", "status:Human Review", "agent", "blocked"]);
+  });
+
+  it("check reports, startup creates missing labels per repo, apply forces", async () => {
+    const created: string[] = [];
+    const m = mockFetch((url, init) => {
+      if (url.pathname === "/repos/o/r/labels" && (init.method ?? "GET") === "GET") {
+        return { body: ["status:todo", "status:In Progress", "status:Done", "status:Human Review", "Agent", "blocked"].map((name) => ({ name })) };
+      }
+      if (url.pathname === "/repos/o/s/labels" && (init.method ?? "GET") === "GET") return { body: [{ name: "bug" }] };
+      if (url.pathname === "/repos/o/s/labels" && init.method === "POST") {
+        created.push(JSON.parse(String(init.body)).name);
+        return { status: 201, body: {} };
+      }
+      return undefined;
+    });
+    const a = mk(m.fn);
+    const check = await a.prepare("check");
+    assert.equal(check[0], "o/r: all 6 workflow labels present");
+    assert.match(check[1], /^o\/s: missing labels: status:Todo, status:In Progress, status:Done, status:Human Review, agent, blocked$/);
+    assert.equal(created.length, 0);
+
+    const start = await a.prepare("startup");
+    assert.match(start[1], /^o\/s: created labels:/);
+    assert.equal(created.length, 6);
+    const post = m.calls.find((c) => c.method === "POST")!;
+    assert.deepEqual(Object.keys(post.body as object).sort(), ["color", "description", "name"]);
+
+    created.length = 0;
+    const off = mk(m.fn, { ensure_labels: false });
+    assert.match((await off.prepare("startup"))[1], /missing labels/);
+    assert.equal(created.length, 0);
+    assert.match((await off.prepare("apply"))[1], /created labels/);
+    assert.equal(created.length, 6);
+  });
+
+  it("label failures are reported, not thrown", async () => {
+    const a = mk(mockFetch(() => ({ status: 403, body: { message: "no" } })).fn);
+    const lines = await a.prepare("startup");
+    assert.match(lines[0], /^o\/r: label check failed/);
+    assert.equal(lines.length, 2);
+  });
+});

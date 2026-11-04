@@ -58,6 +58,8 @@ export interface GitHubProviderConfig {
   /** Limits for `github_issue_attachments`. */
   attachment_max_bytes: number;
   attachment_max_count: number;
+  /** Create missing workflow labels in every repository at startup. */
+  ensure_labels: boolean;
 }
 
 function cfgErr(msg: string): TrackerError {
@@ -223,6 +225,7 @@ export function parseGitHubProvider(p: Record<string, unknown>, env: NodeJS.Proc
     allowed_states: optList(p, "allowed_states"),
     attachment_max_bytes: optInt(p, "attachment_max_bytes", 10 * 1024 * 1024),
     attachment_max_count: optInt(p, "attachment_max_count", 20),
+    ensure_labels: p.ensure_labels !== false,
   };
 }
 
@@ -252,6 +255,7 @@ export class GitHubAdapter implements TrackerAdapter {
   private readonly fetchFn: FetchFn;
   private readonly activeStates: string[];
   private readonly terminalStates: string[];
+  private readonly requiredLabels: string[];
   private readonly repoInfo = new Map<string, { clone_url: string; default_branch: string }>();
 
   constructor(opts: {
@@ -260,12 +264,14 @@ export class GitHubAdapter implements TrackerAdapter {
     terminalStates: string[];
     log: Logger;
     fetchFn?: FetchFn;
+    requiredLabels?: string[];
   }) {
     this.cfg = opts.provider;
     this.log = opts.log.child({ tracker: "github", repos: opts.provider.repos.map((r) => r.full_name).join(",") });
     this.fetchFn = opts.fetchFn ?? fetch;
     this.activeStates = opts.activeStates;
     this.terminalStates = opts.terminalStates;
+    this.requiredLabels = opts.requiredLabels ?? [];
   }
 
   // ---- HTTP -------------------------------------------------------------------------------------
@@ -575,6 +581,60 @@ export class GitHubAdapter implements TrackerAdapter {
     };
     await Promise.all(Array.from({ length: Math.min(8, ids.length) }, worker));
     return out;
+  }
+
+  // ---- Label setup -------------------------------------------------------------------------------
+
+  /**
+   * Labels the workflow relies on: `<prefix><state>` for every active / terminal / allowed state
+   * (except the open/closed pseudo-states, which have no label), plus required and blocking labels.
+   */
+  wantedLabels(): { name: string; color: string; description: string }[] {
+    const out = new Map<string, { name: string; color: string; description: string }>();
+    const add = (name: string, color: string, description: string) => {
+      const n = name.trim();
+      if (n && !out.has(n.toLowerCase())) out.set(n.toLowerCase(), { name: n, color, description });
+    };
+    const skip = new Set([normState(this.cfg.open_state), normState(this.cfg.closed_state)]);
+    const terminal = new Set(this.terminalStates.map(normState));
+    for (const st of [...this.activeStates, ...this.terminalStates, ...(this.cfg.allowed_states ?? [])]) {
+      if (skip.has(normState(st)) || st.includes(",")) continue;
+      const kind = terminal.has(normState(st)) ? "terminal" : this.activeStates.some((a) => normState(a) === normState(st)) ? "active" : "handoff";
+      add(this.stateLabelName(st.trim()), kind === "active" ? "1d76db" : kind === "terminal" ? "0e8a16" : "fbca04", `Symphony workflow state (${kind})`);
+    }
+    for (const l of this.requiredLabels) add(l, "5319e7", "Symphony: issues with this label are eligible for agents");
+    for (const l of this.cfg.blocking_labels) add(l, "b60205", "Symphony: agents skip issues with this label");
+    return [...out.values()];
+  }
+
+  async prepare(mode: "check" | "startup" | "apply"): Promise<string[]> {
+    const create = mode === "apply" || (mode === "startup" && this.cfg.ensure_labels);
+    const wanted = this.wantedLabels();
+    const lines: string[] = [];
+    for (const t of this.cfg.repos) {
+      try {
+        const existing = await this.paginate(this.repoPath(t, `/labels?per_page=100`));
+        const have = new Set(existing.map((l) => (isPlainObject(l) && typeof l.name === "string" ? l.name.toLowerCase() : "")));
+        const missing = wanted.filter((w) => !have.has(w.name.toLowerCase()));
+        if (missing.length === 0) {
+          lines.push(`${t.full_name}: all ${wanted.length} workflow labels present`);
+          continue;
+        }
+        if (!create) {
+          lines.push(`${t.full_name}: missing labels: ${missing.map((m) => m.name).join(", ")}`);
+          continue;
+        }
+        for (const m of missing) {
+          await this.request("POST", this.repoPath(t, "/labels"), m, [422]); // 422 = created concurrently
+        }
+        lines.push(`${t.full_name}: created labels: ${missing.map((m) => m.name).join(", ")}`);
+        this.log.info("created missing GitHub labels", { repo: t.full_name, labels: missing.map((m) => m.name).join(",") });
+      } catch (err) {
+        lines.push(`${t.full_name}: label check failed: ${(err as Error).message}`);
+        this.log.warn("GitHub label setup failed", { repo: t.full_name, error: (err as Error).message });
+      }
+    }
+    return lines;
   }
 
   /** Extra env for hooks and the agent: lets one after_create hook clone the right repository. */

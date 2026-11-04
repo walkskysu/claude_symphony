@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // CLI host lifecycle (SPEC §17.7).
-//   claude-symphony [path-to-WORKFLOW.md] [--port N] [--host H] [--log-file F] [--log-level L]
-//   claude-symphony check [path-to-WORKFLOW.md]   # validate config + tracker connectivity, then exit
+//   claude-symphony [config] [--port N] [--host H] [--log-file F] [--log-level L]
+//   claude-symphony check [config]    # validate config + tracker connectivity + labels, then exit
+//   claude-symphony labels [config]   # create missing tracker labels (GitHub), then exit
 import fs from "node:fs";
 import { parseArgs } from "node:util";
 import { buildConfig, validateCoreConfig } from "./config.ts";
@@ -12,7 +13,12 @@ import { Orchestrator } from "./orchestrator.ts";
 import { buildTracker } from "./tracker/index.ts";
 import { loadWorkflow, resolveWorkflowPath } from "./workflow.ts";
 
-const USAGE = `Usage: claude-symphony [check] [path-to-WORKFLOW.md] [options]
+const USAGE = `Usage: claude-symphony [check|labels] [config-file] [options]
+
+  config-file        Default ./symphony.yml. An explicit path may also be .yaml/.json or a
+                     Symphony-spec WORKFLOW.md.
+  check              Validate config, list candidate issues, report missing labels
+  labels             Create missing workflow labels in every configured repository
 
 Options:
   --port <n>         Start the HTTP dashboard/API (overrides server.port; 0 = ephemeral)
@@ -45,10 +51,10 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(USAGE);
     return 0;
   }
-  let mode: "run" | "check" = "run";
+  let mode: "run" | "check" | "labels" = "run";
   const pos = [...positionals];
-  if (pos[0] === "check") {
-    mode = "check";
+  if (pos[0] === "check" || pos[0] === "labels") {
+    mode = pos[0];
     pos.shift();
   }
   if (pos.length > 1) {
@@ -63,6 +69,24 @@ async function main(argv: string[]): Promise<number> {
   if (!fs.existsSync(workflowPath)) {
     log.error("workflow file not found", { path: workflowPath, error: "missing_workflow_file" });
     return 1;
+  }
+
+  if (mode === "labels") {
+    try {
+      const cfg = buildConfig(loadWorkflow(workflowPath), workflowPath);
+      validateCoreConfig(cfg);
+      const t = buildTracker(cfg, log);
+      if (!t.adapter.prepare) {
+        log.info("tracker has no label setup", { tracker_kind: cfg.tracker.kind });
+        return 0;
+      }
+      const lines = await t.adapter.prepare("apply");
+      for (const l of lines) process.stdout.write(`${l}\n`);
+      return lines.some((l) => l.includes("failed")) ? 1 : 0;
+    } catch (err) {
+      log.error("labels failed", { error: errorSummary(err) });
+      return 1;
+    }
   }
 
   if (mode === "check") {
@@ -80,6 +104,9 @@ async function main(argv: string[]): Promise<number> {
         workspace_root: cfg.workspace.root,
       });
       for (const i of issues) process.stdout.write(`${i.identifier}\t${i.state}\t${i.dispatchable ? "dispatchable" : "blocked"}\t${i.title}\n`);
+      if (t.adapter.prepare) {
+        for (const l of await t.adapter.prepare("check")) process.stdout.write(`labels\t${l}\n`);
+      }
       return 0;
     } catch (err) {
       log.error("check failed", { error: errorSummary(err) });

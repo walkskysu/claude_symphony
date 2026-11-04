@@ -27,6 +27,8 @@ export interface Issue {
 export interface WorkflowDefinition {
   config: Record<string, unknown>;
   prompt_template: string;
+  /** Files the definition was read from (config + optional prompt file); watched for reload. */
+  source_files?: string[];
 }
 
 export interface TokenUsage {
@@ -85,6 +87,11 @@ export interface TrackerAdapter {
   fetchIssuesByIds(issueIds: string[]): Promise<Issue[]>;
   agentToolSpecs?(): ToolSpec[];
   secretEnvironmentNames?(): string[];
+  /**
+   * Optional tracker-side setup (e.g. GitHub labels). `check` only reports, `startup` applies what
+   * the config enables, `apply` applies unconditionally. Returns human-readable report lines.
+   */
+  prepare?(mode: "check" | "startup" | "apply"): Promise<string[]>;
   /** Extra `SYMPHONY_*` env for hooks and the agent process (e.g. the issue's repository). */
   issueEnvironment?(issue: Issue): Record<string, string>;
   executeAgentTool?(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult>;

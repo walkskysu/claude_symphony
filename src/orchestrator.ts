@@ -173,7 +173,7 @@ export class Orchestrator {
   // ---- Workflow load / reload (SPEC §6.2) -------------------------------------------------------
 
   private loadEffective(): Effective {
-    const workflow = loadWorkflow(this.opts.workflowPath);
+    const workflow = loadWorkflow(this.opts.workflowPath, this.env);
     const cfg = buildConfig(workflow, this.opts.workflowPath, this.env);
     validateCoreConfig(cfg);
     const trackerLog = this.log.child({ component: "tracker" });
@@ -188,7 +188,8 @@ export class Orchestrator {
       this.effective = eff;
       this.lastConfigError = null;
       this.workflowInvalid = false;
-      this.watcher?.markSeen();
+      if (eff.workflow.source_files) this.watcher?.setFiles(eff.workflow.source_files);
+      else this.watcher?.markSeen();
       this.applyLogging(eff.cfg);
       this.log.info("workflow reloaded", {
         reason,
@@ -196,6 +197,7 @@ export class Orchestrator {
         poll_interval_ms: eff.cfg.polling.interval_ms,
         max_concurrent_agents: eff.cfg.agent.max_concurrent_agents,
       });
+      void this.prepareTracker();
       this.notify();
       return true;
     } catch (err) {
@@ -234,10 +236,12 @@ export class Orchestrator {
       terminal_states: this.effective.tracker.terminalStates.join(","),
     });
     this.watcher = new WorkflowWatcher(this.opts.workflowPath, () => this.reload("file_changed"), this.opts.watchPollMs);
+    if (this.effective.workflow.source_files) this.watcher.setFiles(this.effective.workflow.source_files);
     if (!this.opts.disableToolBridge) {
       this.bridge = new ToolBridge(this.log);
       await this.bridge.start();
     }
+    await this.prepareTracker();
     await this.startupTerminalCleanup();
     this.scheduleTick(0);
   }
@@ -257,6 +261,17 @@ export class Orchestrator {
     await Promise.race([Promise.allSettled(waits), new Promise((r) => setTimeout(r, 15000))]);
     await this.bridge?.stop();
     this.log.info("symphony stopped", {});
+  }
+
+  /** Tracker-side setup (e.g. create missing GitHub labels). Failures are logged, never fatal. */
+  private async prepareTracker(): Promise<void> {
+    const adapter = this.effective?.tracker.adapter;
+    if (!adapter?.prepare) return;
+    try {
+      for (const line of await adapter.prepare("startup")) this.log.info("tracker setup", { result: line });
+    } catch (err) {
+      this.log.warn("tracker setup failed; continuing", { error: errorSummary(err) });
+    }
   }
 
   /** Env for `before_remove`: issue id plus adapter-provided vars (e.g. its repository). */

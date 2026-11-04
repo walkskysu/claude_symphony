@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # claude-symphony launcher.
 #
-#   scripts/symphony.sh start   [WORKFLOW.md] [-- extra cli args]   # background daemon
-#   scripts/symphony.sh run     [WORKFLOW.md] [-- extra cli args]   # foreground (Ctrl-C to stop)
-#   scripts/symphony.sh check   [WORKFLOW.md]                       # validate config, list candidates
+#   scripts/symphony.sh start   [config] [-- extra cli args]   # background daemon
+#   scripts/symphony.sh run     [config] [-- extra cli args]   # foreground (Ctrl-C to stop)
+#   scripts/symphony.sh check   [config]                       # validate, list candidates, report labels
+#   scripts/symphony.sh labels  [config]                       # create missing GitHub labels
 #   scripts/symphony.sh stop | restart | status | logs
 #
 # Environment:
 #   SYMPHONY_ENV_FILE   env file to load (default: <project>/.env; secrets such as GITHUB_TOKEN)
-#   SYMPHONY_WORKFLOW   workflow path when none is given (default: ./WORKFLOW.md)
+#   SYMPHONY_WORKFLOW   config path when none is given (default: <project>/symphony.yml)
 #   SYMPHONY_STATE_DIR  pid/stdout dir (default: <project>/.symphony)
 #   SYMPHONY_PORT       passed as --port when set
 set -euo pipefail
@@ -63,13 +64,13 @@ running_pid() {
 
 # Parse "[WORKFLOW] [-- extra...]" into WORKFLOW + EXTRA.
 parse_args() {
-  WORKFLOW="${SYMPHONY_WORKFLOW:-WORKFLOW.md}"
+  WORKFLOW="${SYMPHONY_WORKFLOW:-$ROOT/symphony.yml}"
   EXTRA=()
   if [[ $# -gt 0 && "$1" != "--" && "$1" != -* ]]; then WORKFLOW="$1"; shift; fi
   [[ "${1:-}" == "--" ]] && shift
   EXTRA=("$@")
   [[ -n "${SYMPHONY_PORT:-}" ]] && EXTRA+=(--port "$SYMPHONY_PORT")
-  [[ -f "$WORKFLOW" ]] || die "workflow file not found: $WORKFLOW (copy $ROOT/WORKFLOW.example.md to start)"
+  [[ -f "$WORKFLOW" ]] || die "config file not found: $WORKFLOW (copy $ROOT/symphony.example.yml to $ROOT/symphony.yml to start)"
   WORKFLOW="$(cd "$(dirname "$WORKFLOW")" && pwd)/$(basename "$WORKFLOW")"
 }
 
@@ -104,6 +105,12 @@ cmd_check() {
   exec node "$ROOT/dist/cli.js" check "$WORKFLOW"
 }
 
+cmd_labels() {
+  parse_args "$@"
+  ensure_node; ensure_build; load_env
+  exec node "$ROOT/dist/cli.js" labels "$WORKFLOW"
+}
+
 cmd_stop() {
   local pid
   if ! pid="$(running_pid)"; then echo "symphony is not running"; return 0; fi
@@ -132,7 +139,7 @@ cmd_logs() {
   exec tail -n 100 -f "$OUT_FILE"
 }
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
 sub="${1:-}"
 [[ $# -gt 0 ]] && shift
@@ -140,6 +147,7 @@ case "$sub" in
   start) cmd_start "$@" ;;
   run) cmd_run "$@" ;;
   check) cmd_check "$@" ;;
+  labels) cmd_labels "$@" ;;
   stop) cmd_stop ;;
   restart) cmd_stop; cmd_start "$@" ;;
   status) cmd_status ;;

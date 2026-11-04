@@ -1,5 +1,6 @@
----
-# Copy to WORKFLOW.md, put GITHUB_TOKEN=... in .env, then:
+# claude-symphony configuration.
+# Copy to symphony.yml, put GITHUB_TOKEN=... in .env, then:
+#   scripts/symphony.sh check            # validate, list candidates, report missing labels
 #   scripts/symphony.sh start            # or: scripts/symphony.sh run (foreground)
 tracker:
   kind: github
@@ -17,6 +18,11 @@ tracker:
     # Single-repo form still works:  repository: your-org/your-repo
     token: $GITHUB_TOKEN                  # host-side only; never passed to the agent
     state_label_prefix: "status:"         # states are labels: status:Todo, status:In Progress, ...
+    # Workflow labels (status:<state> for active/terminal/allowed states, required_labels,
+    # blocking_labels) are created in every repository at startup when missing.
+    # Set to false to manage labels yourself; `scripts/symphony.sh labels` creates them on demand.
+    ensure_labels: true
+    allowed_states: [Human Review]        # extra states the agent may set (also get labels)
     # assignee: your-bot-login            # only dispatch issues assigned to this login
     # blocking_labels: [blocked]          # issues with these labels are not dispatchable
   required_labels: [agent]                # only issues labelled `agent` are eligible
@@ -67,36 +73,7 @@ server:
 logging:
   file: ~/symphony.log
   agent_log_dir: ~/symphony_logs
----
-You are an autonomous software engineer working on GitHub issue **{{ issue.identifier }}**
-in repository `{{ issue.native_ref.full_name }}` (checked out in the current directory).
 
-- Title: {{ issue.title }}
-- URL: {{ issue.url }}
-- Current state: {{ issue.state }}
-- Labels: {% for l in issue.labels %}`{{ l }}` {% endfor %}
-{% if attempt %}
-This is retry/continuation attempt {{ attempt }}. Inspect the workspace and the issue comments
-(`github_issue_read`) to see what was already done before continuing.
-{% endif %}
-
-## Issue description
-
-{{ issue.description }}
-
-## How to work
-
-1. If the issue is in `Todo`, call `github_issue_set_state` with `In Progress` first.
-2. Read the issue and its comments with `github_issue_read`. If they contain screenshots or other
-   images, call `github_issue_attachments` to see them (saved under `.symphony/attachments/`).
-3. Implement the change in this workspace (already a git checkout on branch
-   `symphony/{{ issue.identifier }}`). Run the project's tests/linters and make them pass.
-4. Commit your work with a clear message.
-5. Push with `github_git_push` (branch `symphony/{{ issue.identifier }}`); never push to the default branch.
-6. Open a pull request with `github_pr_create` (check `github_pr_list` first to avoid duplicates).
-7. Post a short summary comment with `github_issue_comment` (what changed, how it was tested, PR link).
-8. Move the issue to `Human Review` with `github_issue_set_state`.
-
-If you are blocked (missing information, failing infrastructure), explain the blocker in an issue
-comment and move the issue to `Human Review` instead of guessing. No human will answer questions
-during the run.
+# Prompt template (Liquid), kept in its own Markdown file. The path is relative to this config
+# file. Edits to either file are picked up without restart. (Inline `prompt: |` also works.)
+prompt_file: prompts/default.md

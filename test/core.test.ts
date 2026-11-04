@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import { buildConfig } from "../src/config.ts";
 import { SymphonyError } from "../src/errors.ts";
 import { renderPrompt } from "../src/template.ts";
-import { loadWorkflow, parseWorkflow, resolveWorkflowPath, WorkflowWatcher } from "../src/workflow.ts";
+import { loadWorkflow, parseConfigFile, parseWorkflow, resolveWorkflowPath, WorkflowWatcher } from "../src/workflow.ts";
 import { WorkspaceManager, workspaceKey, workspacePathFor } from "../src/workspace.ts";
 import { mkIssue, quietLogger, tmpDir, waitFor } from "./helpers.ts";
 
@@ -21,9 +21,39 @@ const code = (fn: () => unknown) => {
 };
 
 describe("workflow loader", () => {
-  it("path precedence: explicit, else cwd WORKFLOW.md", () => {
+  it("path: explicit, else always ./symphony.yml (no lookup)", () => {
     assert.equal(resolveWorkflowPath("x/W.md", "/r"), "/r/x/W.md");
-    assert.equal(resolveWorkflowPath(undefined, "/r"), "/r/WORKFLOW.md");
+    const d = tmpDir();
+    fs.writeFileSync(path.join(d, "WORKFLOW.md"), "x");
+    assert.equal(resolveWorkflowPath(undefined, d), path.join(d, "symphony.yml"));
+    assert.equal(resolveWorkflowPath("", d), path.join(d, "symphony.yml"));
+  });
+  it("yaml config: inline prompt, prompt_file, json, typed errors", () => {
+    const d = tmpDir();
+    const y = parseConfigFile("tracker:\n  kind: github\nprompt: |\n  Hi {{ issue.title }}\n", path.join(d, "s.yaml"));
+    assert.deepEqual(y.config, { tracker: { kind: "github" } });
+    assert.equal(y.prompt_template, "Hi {{ issue.title }}");
+    assert.deepEqual(y.source_files, [path.join(d, "s.yaml")]);
+
+    fs.mkdirSync(path.join(d, "prompts"));
+    fs.writeFileSync(path.join(d, "prompts", "p.md"), "\n# From file\r\n{{ issue.id }}\n");
+    fs.writeFileSync(path.join(d, "s.yaml"), "polling: {interval_ms: 5}\nprompt_file: prompts/p.md\n");
+    const f = loadWorkflow(path.join(d, "s.yaml"));
+    assert.deepEqual(f.config, { polling: { interval_ms: 5 } });
+    assert.equal(f.prompt_template, "# From file\n{{ issue.id }}");
+    assert.deepEqual(f.source_files, [path.join(d, "s.yaml"), path.join(d, "prompts", "p.md")]);
+
+    fs.writeFileSync(path.join(d, "s.json"), JSON.stringify({ tracker: { kind: "github" }, prompt: "j" }));
+    assert.equal(loadWorkflow(path.join(d, "s.json")).prompt_template, "j");
+
+    const p = path.join(d, "x.yaml");
+    assert.equal(code(() => parseConfigFile("- a\n", p)), "workflow_front_matter_not_a_map");
+    assert.equal(code(() => parseConfigFile("a: [\n", p)), "workflow_parse_error");
+    assert.equal(code(() => parseConfigFile("a: 1\na: 2\n", p)), "workflow_parse_error");
+    assert.equal(code(() => parseConfigFile("prompt: a\nprompt_file: b\n", p)), "workflow_parse_error");
+    assert.equal(code(() => parseConfigFile("prompt_file: missing.md\n", p)), "workflow_parse_error");
+    assert.equal(code(() => parseConfigFile("prompt: [1]\n", p)), "workflow_parse_error");
+    assert.equal(parseConfigFile("", p).prompt_template, "");
   });
   it("splits front matter and trims body", () => {
     const wf = parseWorkflow("---\ntracker:\n  kind: github\n---\n\n  Hello {{ issue.title }}  \n\n");
@@ -49,6 +79,21 @@ describe("workflow loader", () => {
     const w = new WorkflowWatcher(p, () => n++, 100);
     await new Promise((r) => setTimeout(r, 50));
     fs.writeFileSync(p, "bb");
+    await waitFor(() => n > 0, 3000);
+    w.close();
+  });
+  it("watcher follows the prompt file set via setFiles", async () => {
+    const d = tmpDir();
+    const cfg = path.join(d, "symphony.yml");
+    const pf = path.join(d, "sub", "p.md");
+    fs.mkdirSync(path.dirname(pf));
+    fs.writeFileSync(cfg, "prompt_file: sub/p.md\n");
+    fs.writeFileSync(pf, "a");
+    let n = 0;
+    const w = new WorkflowWatcher(cfg, () => n++, 100);
+    w.setFiles([cfg, pf]);
+    await new Promise((r) => setTimeout(r, 50));
+    fs.writeFileSync(pf, "changed");
     await waitFor(() => n > 0, 3000);
     w.close();
   });

@@ -28,7 +28,7 @@ registerTracker("github", (cfg, log, env) => {
   const activeStates = cfg.tracker.active_states ?? GITHUB_DEFAULT_ACTIVE_STATES;
   const terminalStates = cfg.tracker.terminal_states ?? GITHUB_DEFAULT_TERMINAL_STATES;
   return {
-    adapter: new GitHubAdapter({ provider, activeStates, terminalStates, log }),
+    adapter: new GitHubAdapter({ provider, activeStates, terminalStates, log, requiredLabels: cfg.tracker.required_labels }),
     activeStates,
     terminalStates,
   };
