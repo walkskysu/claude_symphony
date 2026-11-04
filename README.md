@@ -162,6 +162,14 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
   `invalid_tracker_config`（provider 键非法）、`missing_tracker_secret`（token 为空）、`tracker_request`（网络/超时）、`tracker_status`（非 2xx；5xx 标记 retryable）、`tracker_response`（非 JSON / 结构不对 / 畸形 issue）、`tracker_pagination`（超过 max_pages 或跨域 next 链接）、`tracker_rate_limited`（429，或 403 且 `x-ratelimit-remaining: 0`/`retry-after`；带 `retryAfterMs`，orchestrator 据此推迟下一次 tick）。
 - **需要从子进程环境中移除的密钥变量**：`GITHUB_TOKEN`、`GH_TOKEN`、`GITHUB_PAT`、`GH_ENTERPRISE_TOKEN`、`GITHUB_ENTERPRISE_TOKEN`，以及 `token: $X` 引用的 `X`。
 
+### 目标项目自己的 `.env`
+
+被处理的仓库如果需要自己的环境变量（API key、数据库地址等），把它们放在宿主机的 `~/.config/symphony/<仓库名>.env`（例如 `~/.config/symphony/llm_media_library.env`，建议 `chmod 600`）。`symphony.example.yml` 中的 `before_run` 钩子会在每次运行前把它复制为工作区里的 `.env`，并写入 `.git/info/exclude`，即使目标仓库的 `.gitignore` 没写 `.env`，代理也不会提交它。文件不存在时跳过。
+
+- 文件按仓库名区分（不含 owner）；不同 owner 下的同名仓库会共用一个文件，需要区分时把路径改为 `$SYMPHONY_ISSUE_REPO_OWNER/$SYMPHONY_ISSUE_REPO_NAME.env`。
+- 不要把项目变量放进 symphony 自己的 `.env`：除被识别为密钥的变量（如 `GITHUB_TOKEN`）外，它们会传给所有仓库的代理。
+- 复制进工作区的内容代理可以读取，只放项目运行/测试需要的值，不要放高权限凭据。
+
 ### 代理工具（通过 MCP 服务器 `symphony` 暴露，在 Claude 中显示为 `mcp__symphony__<name>`）
 
 | 工具 | 会修改跟踪器 | 作用域 | 输入 |

@@ -48,6 +48,13 @@ hooks:
   before_run: |
     auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
     git -c "http.extraHeader=Authorization: Basic $auth" fetch origin --quiet || true
+    # Per-repo env file (optional): ~/.config/symphony/<repo name>.env is copied to the workspace
+    # as .env before every run, and excluded from git locally so the agent cannot commit it.
+    src="$HOME/.config/symphony/$SYMPHONY_ISSUE_REPO_NAME.env"
+    if [ -f "$src" ]; then
+      install -m 600 "$src" .env
+      grep -qxF '.env' .git/info/exclude 2>/dev/null || echo '.env' >> .git/info/exclude
+    fi
 
 agent:
   max_concurrent_agents: 3
