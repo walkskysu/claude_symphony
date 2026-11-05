@@ -212,7 +212,7 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
 ## 实现定义的行为
 
 - 工作区位置存在非目录文件时：失败，不删除。
-- **token 统计与仪表盘**：token 数在 agent 运行中即时累加（取 Claude Code 每条 `assistant` 流式消息携带的 usage，同一 API 消息拆成多条事件时不重复计算），每轮结束时以 `result` 的 usage 为准。仪表盘每 2 秒刷新，不显示费用（`cost_usd` 仍保留在 `/api/v1/state` 中）；每个运行中的 issue 在 Running 表下方有一个可滚动的消息流（最近 100 条事件，停在底部时自动跟随最新消息），`/api/v1/state` 的 running 行也带有 `recent_events`。
+- **token 统计与仪表盘**：token 数在 agent 运行中即时累加（取 Claude Code 每条 `assistant` 流式消息携带的 usage，同一 API 消息拆成多条事件时不重复计算），每轮结束时以 `result` 的 usage 为准。仪表盘每 2 秒刷新，不显示费用（`cost_usd` 仍保留在 `/api/v1/state` 中：取自 Claude Code `result` 消息的 `total_cost_usd`，这是整个会话的累计值并按 API 公开价格估算，因此每个会话取最新值、各会话之间相加；使用订阅时不代表实际扣费）；每个运行中的 issue 在 Running 表下方有一个可滚动的消息流（最近 100 条事件，停在底部时自动跟随最新消息），`/api/v1/state` 的 running 行也带有 `recent_events`。
 - **GitHub 网络错误**：只读的 GET 请求在网络层失败（连接重置、DNS、超时等，非 HTTP 错误状态）时，间隔 1s、3s 自动重试 2 次，每次重试记一条 warn 日志；写操作（评论、改标签、建 PR 等）不重试，因为请求可能已经生效。错误信息包含底层原因（如 `fetch failed: read ECONNRESET`、`getaddrinfo ENOTFOUND ...`）而不只是 `fetch failed`。
 - `after_create` 失败：删除刚创建的目录。复用的工作区不会被破坏性重置。
 - 协调终止（terminal / 非活跃 / 不可路由 / 不可见）会释放 claim，不重试；只有 terminal 会清理工作区。停滞终止按指数退避重试。

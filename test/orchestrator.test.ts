@@ -113,6 +113,9 @@ describe("claude session client", () => {
     // repeated across content blocks is not double counted), replaced by the result usage.
     const live = events.filter((e) => e.event === "notification" && e.usage).map((e) => e.usage!.total_tokens);
     assert.deepEqual(live, [85, 90, 255, 260]);
+    // total_cost_usd is session-cumulative: the session total is the latest value, not a sum.
+    assert.deepEqual(done.map((e) => e.cost_usd), [0.01, 0.02]);
+    assert.deepEqual([r1.cost_usd, r2.cost_usd].map((c) => Math.round(c! * 1000) / 1000), [0.01, 0.01]);
     assert.ok(events.some((e) => e.rate_limits));
     assert.ok(fs.readFileSync(path.join(dir, "a.log"), "utf8").includes("[stderr] fake-claude diagnostics"));
   });

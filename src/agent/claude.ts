@@ -36,6 +36,7 @@ export interface TurnResult {
   session_id: string;
   result_text: string;
   num_turns: number | null;
+  /** Cost of this turn alone (delta of the session-cumulative `total_cost_usd`). */
   cost_usd: number | null;
   permission_denials: unknown[];
 }
@@ -360,8 +361,11 @@ export class ClaudeSession {
               total_tokens: this.totals.total_tokens + usage.total_tokens,
             };
           }
-          const cost = typeof obj.total_cost_usd === "number" ? obj.total_cost_usd : null;
-          if (cost !== null) this.totalCost += cost;
+          // `total_cost_usd` is cumulative for the whole Claude Code session (process), unlike
+          // `usage`, which covers only this turn; so it replaces the running total.
+          const sessionCost = typeof obj.total_cost_usd === "number" ? obj.total_cost_usd : null;
+          const cost = sessionCost !== null ? Math.max(0, sessionCost - this.totalCost) : null;
+          if (sessionCost !== null) this.totalCost = Math.max(this.totalCost, sessionCost);
           const denials = Array.isArray(obj.permission_denials) ? obj.permission_denials : [];
           const text = typeof obj.result === "string" ? obj.result : "";
           const isError = obj.is_error === true || obj.subtype !== "success";

@@ -66,7 +66,7 @@ rl.on("line", async (line) => {
     session_id: sessionId,
     num_turns: 2,
     result: `done turn ${turns}`,
-    total_cost_usd: 0.01,
+    total_cost_usd: 0.01 * turns, // cumulative for the session, like Claude Code
     usage: { input_tokens: 100, cache_read_input_tokens: 50, cache_creation_input_tokens: 0, output_tokens: 20 },
   });
 });
