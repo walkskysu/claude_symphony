@@ -54,7 +54,10 @@ rl.on("line", async (line) => {
   }
   if (mode === "silent_after_init" || mode === "hang") return;
   if (process.env.FAKE_TOOL && turns === 1) await callTool();
-  out({ type: "assistant", session_id: sessionId, message: { content: [{ type: "text", text: `working turn ${turns}` }, { type: "tool_use", name: "Bash", input: { command: "ls" } }] } });
+  // One API response split into two events with the same id (as Claude Code streams it).
+  const msgUsage = (out_) => ({ input_tokens: 60, cache_read_input_tokens: 20, cache_creation_input_tokens: 0, output_tokens: out_ });
+  out({ type: "assistant", session_id: sessionId, message: { id: `msg_${turns}`, usage: msgUsage(5), content: [{ type: "text", text: `working turn ${turns}` }] } });
+  out({ type: "assistant", session_id: sessionId, message: { id: `msg_${turns}`, usage: msgUsage(10), content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }] } });
   out({ type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 123 } });
   out({
     type: "result",

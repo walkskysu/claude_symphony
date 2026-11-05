@@ -109,6 +109,10 @@ describe("claude session client", () => {
     assert.equal(events.filter((e) => e.event === "session_started").length, 1);
     const done = events.filter((e) => e.event === "turn_completed");
     assert.deepEqual(done.map((e) => e.usage!.total_tokens), [170, 340]);
+    // Live usage while a turn runs: thread total so far + the in-progress API message (same id
+    // repeated across content blocks is not double counted), replaced by the result usage.
+    const live = events.filter((e) => e.event === "notification" && e.usage).map((e) => e.usage!.total_tokens);
+    assert.deepEqual(live, [85, 90, 255, 260]);
     assert.ok(events.some((e) => e.rate_limits));
     assert.ok(fs.readFileSync(path.join(dir, "a.log"), "utf8").includes("[stderr] fake-claude diagnostics"));
   });

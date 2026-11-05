@@ -13,7 +13,7 @@ import { loadWorkflow, WorkflowWatcher } from "./workflow.ts";
 import { WorkspaceManager } from "./workspace.ts";
 
 export const CONTINUATION_DELAY_MS = 1000;
-const RECENT_EVENTS = 50;
+const RECENT_EVENTS = 100;
 
 export interface RecentEvent {
   at: string;
@@ -815,6 +815,7 @@ export class Orchestrator {
         total_tokens: e.codex_total_tokens,
       },
       cost_usd: e.cost_usd,
+      recent_events: e.recent_events,
     };
   }
 

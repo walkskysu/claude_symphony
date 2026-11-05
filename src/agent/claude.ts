@@ -112,6 +112,12 @@ export class ClaudeSession {
   private exitHandler: (() => void) | null = null;
   private totals: TokenUsage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
   private totalCost = 0;
+  /**
+   * Per-API-message usage seen in `assistant` events of the current turn, keyed by message id.
+   * Claude Code splits one API response into several `assistant` events (one per content block)
+   * that repeat the same id, so the latest value per id wins instead of being summed.
+   */
+  private turnUsage = new Map<string, TokenUsage>();
   private readonly log: Logger;
 
   constructor(opts: SessionOptions) {
@@ -232,6 +238,30 @@ export class ClaudeSession {
     this.child.stdin.write(JSON.stringify(obj) + "\n");
   }
 
+  /**
+   * Running thread totals including the in-progress turn, from the per-message usage that
+   * `assistant` events carry. The turn's `result` usage replaces this estimate when it arrives.
+   */
+  private trackLiveUsage(msg: unknown): TokenUsage | null {
+    if (!isPlainObject(msg)) return null;
+    const u = extractUsage(msg.usage);
+    if (!u) return null;
+    const id = typeof msg.id === "string" ? msg.id : `anon-${this.turnUsage.size}`;
+    const prev = this.turnUsage.get(id);
+    this.turnUsage.set(id, {
+      input_tokens: Math.max(prev?.input_tokens ?? 0, u.input_tokens),
+      output_tokens: Math.max(prev?.output_tokens ?? 0, u.output_tokens),
+      total_tokens: 0,
+    });
+    let input = this.totals.input_tokens;
+    let output = this.totals.output_tokens;
+    for (const v of this.turnUsage.values()) {
+      input += v.input_tokens;
+      output += v.output_tokens;
+    }
+    return { input_tokens: input, output_tokens: output, total_tokens: input + output };
+  }
+
   /** Run one turn: send a user message and stream until the `result` message (SPEC §10.3). */
   runTurn(prompt: string): Promise<TurnResult> {
     const { cfg, signal } = this.opts;
@@ -298,7 +328,14 @@ export class ClaudeSession {
           return;
         }
         if (type === "assistant") {
-          this.emit({ event: "notification", session_id: sessionId, turn_id: turnId, message: summarizeAssistant(obj.message) });
+          const live = this.trackLiveUsage(obj.message);
+          this.emit({
+            event: "notification",
+            session_id: sessionId,
+            turn_id: turnId,
+            message: summarizeAssistant(obj.message),
+            ...(live ? { usage: live } : {}),
+          });
           return;
         }
         if (type === "user") {
@@ -315,6 +352,7 @@ export class ClaudeSession {
         }
         if (type === "result") {
           const usage = extractUsage(obj.usage);
+          this.turnUsage.clear();
           if (usage) {
             this.totals = {
               input_tokens: this.totals.input_tokens + usage.input_tokens,
