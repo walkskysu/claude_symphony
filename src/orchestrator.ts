@@ -124,6 +124,9 @@ export class Orchestrator {
   readonly claimed = new Set<string>();
   readonly retryAttempts = new Map<string, RetryEntry>();
   readonly completed = new Set<string>();
+  /** Issues this process worked on that have since been released as done: they reached a terminal
+   *  state, or left the active states after a successful worker run (e.g. handed off for review). */
+  readonly finished = new Set<string>();
   codexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0, cost_usd: 0 };
   rateLimits: unknown = null;
   private history = new Map<string, IssueHistory>();
@@ -461,6 +464,7 @@ export class Orchestrator {
     };
     this.running.set(issue.id, entry);
     this.claimed.add(issue.id);
+    this.finished.delete(issue.id);
     const prevRetry = this.retryAttempts.get(issue.id);
     if (prevRetry) clearTimeout(prevRetry.timer_handle);
     this.retryAttempts.delete(issue.id);
@@ -581,6 +585,7 @@ export class Orchestrator {
         });
       } else {
         this.claimed.delete(entry.issue_id);
+        if (kind === "terminal") this.finished.add(entry.issue_id);
         hist.last_status = "released";
         log.info("worker stopped by reconciliation; claim released", { reason: kind, cleanup_workspace: cleanup });
         if (cleanup) await this.workspaces.removeWorkspace(entry.identifier, this.removeEnv(entry.issue));
@@ -672,6 +677,7 @@ export class Orchestrator {
     }
     if (this.isTerminal(issue.state)) {
       this.claimed.delete(issueId);
+      this.finished.add(issueId);
       log.info("retry: issue is terminal; cleaning workspace and releasing", { state: issue.state });
       await this.workspaces.removeWorkspace(issue.identifier, this.removeEnv(issue));
       this.notify();
@@ -688,6 +694,7 @@ export class Orchestrator {
     }
     if (!this.isActive(issue.state) || !this.issueRoutable(issue)) {
       this.claimed.delete(issueId);
+      if (this.completed.has(issueId) && !this.isActive(issue.state)) this.finished.add(issueId);
       log.info("retry: issue not eligible; claim released", { state: issue.state, dispatchable: issue.dispatchable });
       this.notify();
       return;
@@ -836,7 +843,7 @@ export class Orchestrator {
     for (const e of this.running.values()) active += (now - e.started_at) / 1000;
     return {
       generated_at: new Date(now).toISOString(),
-      counts: { running: this.running.size, retrying: this.retryAttempts.size, claimed: this.claimed.size },
+      counts: { running: this.running.size, retrying: this.retryAttempts.size, claimed: this.claimed.size, finished: this.finished.size },
       running: [...this.running.values()].map((e) => this.runningRow(e)),
       retrying: [...this.retryAttempts.values()].sort((a, b) => a.due_at_ms - b.due_at_ms).map((r) => this.retryRow(r)),
       codex_totals: {

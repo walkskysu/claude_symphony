@@ -94,7 +94,7 @@ main{max-width:1200px;margin:0 auto;padding:0 16px 32px}
 .wrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:8px}
 table{border-collapse:collapse;width:100%;min-width:720px}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 th{font-size:12px;color:var(--muted);font-weight:600}tr:last-child td{border-bottom:0}
-td.num{font-variant-numeric:tabular-nums;text-align:right}.msg{color:var(--muted);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td.num{font-variant-numeric:tabular-nums;text-align:center}th.num{text-align:center}.msg{color:var(--muted);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 a{color:var(--accent)}button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:8px 14px;font:inherit;cursor:pointer}
 .err{color:var(--err)}.ok{color:var(--ok)}.empty{padding:14px;color:var(--muted)}code{font-size:12px}
 .feeds{display:grid;gap:12px}.feed{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
@@ -109,9 +109,9 @@ a{color:var(--accent)}button{background:var(--accent);color:#fff;border:0;border
 <div><span id="health" class="ok"></span> <button id="refresh">Refresh now</button></div></header>
 <main>
 <div class="tiles" id="tiles"></div>
-<h2>Running</h2><div class="wrap"><table><thead><tr><th>Issue</th><th>State</th><th>Turns</th><th>Last event</th><th>Started</th><th class="num">Tokens</th></tr></thead><tbody id="running"></tbody></table></div>
+<h2>Running</h2><div class="wrap"><table><thead><tr><th>Issue</th><th>State</th><th class="num">Turns</th><th>Last event</th><th>Started</th><th class="num">Tokens</th></tr></thead><tbody id="running"></tbody></table></div>
 <h2>Messages</h2><div class="feeds" id="feeds"></div>
-<h2>Retry queue</h2><div class="wrap"><table><thead><tr><th>Issue</th><th>Attempt</th><th>Due</th><th>Error</th></tr></thead><tbody id="retrying"></tbody></table></div>
+<h2>Retry queue</h2><div class="wrap"><table><thead><tr><th>Issue</th><th class="num">Attempt</th><th>Due</th><th>Error</th></tr></thead><tbody id="retrying"></tbody></table></div>
 <h2>Rate limits</h2><div class="wrap"><pre id="rl" class="empty" style="margin:0;white-space:pre-wrap"></pre></div>
 </main>
 <script>
@@ -120,7 +120,7 @@ const rel=t=>{if(!t)return"–";const d=(Date.parse(t)-Date.now())/1000;const a=
 const link=(id,url)=>url?'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(id)+'</a>':esc(id);
 async function load(){
  try{const s=await (await fetch("api/v1/state")).json();
- const t=s.codex_totals;const tiles=[["Running",s.counts.running],["Retrying",s.counts.retrying],["Total tokens",t.total_tokens.toLocaleString()],["Runtime",Math.round(t.seconds_running/60)+" min"]];
+ const t=s.codex_totals;const tiles=[["Running",s.counts.running],["Retrying",s.counts.retrying],["Finished",s.counts.finished??0],["Total tokens",t.total_tokens.toLocaleString()],["Runtime",Math.round(t.seconds_running/60)+" min"]];
  document.getElementById("tiles").innerHTML=tiles.map(([k,v])=>'<div class="tile"><b>'+esc(v)+'</b><span>'+esc(k)+'</span></div>').join("");
  const h=s.health;const he=document.getElementById("health");const e=h.config_error||h.last_tick_error;he.className=e?"err":"ok";he.textContent=e?e:("healthy · last poll "+rel(h.last_tick_at));
  document.getElementById("running").innerHTML=s.running.length?s.running.map(r=>'<tr><td>'+link(r.issue_identifier,r.issue_url)+'<div class="msg">'+esc(r.title)+'</div></td><td>'+esc(r.state)+(r.stopping?' <span class="err">(stopping: '+esc(r.stopping)+')</span>':'')+'</td><td class="num">'+r.turn_count+'</td><td>'+esc(r.last_event??"–")+'<div class="msg">'+rel(r.last_event_at)+'</div></td><td>'+rel(r.started_at)+'</td><td class="num">'+r.tokens.total_tokens.toLocaleString()+'</td></tr>').join(""):'<tr><td colspan="6" class="empty">No active sessions</td></tr>';
@@ -130,7 +130,8 @@ async function load(){
  }catch(e){const he=document.getElementById("health");he.className="err";he.textContent="state unavailable: "+e.message}
 }
 // Message feeds: one scrolling log per running issue. Each log is only re-rendered when it gets
-// new events, and it stays pinned to the bottom unless the reader has scrolled up.
+// new events. Newest events are shown first; the log stays at the top unless the reader has
+// scrolled down, in which case their reading position is preserved.
 const feedState=new Map();
 const clock=t=>{const d=new Date(t);return isNaN(d)?"":d.toLocaleTimeString([], {hour12:false})};
 const evClass=e=>e.event==="turn_completed"?"done":/failed|error|timeout|cancel/.test(e.event)?"fail":/^\\[tool\\]/.test(e.message||"")||e.event.startsWith("tool_")?"tool":"";
@@ -147,9 +148,9 @@ function renderFeeds(running){
   const evs=(r.recent_events||[]).filter(e=>e.message&&e.message!=="[tool result]");
   const last=evs[evs.length-1];const key=evs.length+"|"+(last?last.at+last.event+last.message:"");
   if(key===st.key)continue;st.key=key;
-  const log=st.el.querySelector(".log");const pinned=log.scrollHeight-log.scrollTop-log.clientHeight<24;
-  log.innerHTML=evs.length?evs.map(e=>'<div class="ev '+evClass(e)+'"><time>'+clock(e.at)+'</time><i>'+esc(e.event)+'</i><span>'+esc(e.message)+'</span></div>').join(""):'<div class="empty">Waiting for agent output…</div>';
-  if(pinned)log.scrollTop=log.scrollHeight;
+  const log=st.el.querySelector(".log");const atTop=log.scrollTop<24;const prevH=log.scrollHeight,prevTop=log.scrollTop;
+  log.innerHTML=evs.length?evs.slice().reverse().map(e=>'<div class="ev '+evClass(e)+'"><time>'+clock(e.at)+'</time><i>'+esc(e.event)+'</i><span>'+esc(e.message)+'</span></div>').join(""):'<div class="empty">Waiting for agent output…</div>';
+  log.scrollTop=atTop?0:prevTop+(log.scrollHeight-prevH);
  }
 }
 document.getElementById("refresh").onclick=async()=>{await fetch("api/v1/refresh",{method:"POST"});setTimeout(load,800)};
