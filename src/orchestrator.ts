@@ -74,6 +74,22 @@ interface IssueHistory {
   recent_events: RecentEvent[];
   last_state: string | null;
   last_status: string;
+  /** Totals across every worker run of this issue in this process. */
+  runs: number;
+  turns: number;
+  tokens: number;
+  seconds_running: number;
+}
+
+/** An issue this process worked on that was released as done. */
+export interface FinishedEntry {
+  issue_id: string;
+  identifier: string;
+  url: string | null;
+  title: string;
+  /** Tracker state when it was released (e.g. Done, In Review). */
+  state: string;
+  finished_at: number;
 }
 
 export interface Effective {
@@ -126,9 +142,11 @@ export class Orchestrator {
   readonly completed = new Set<string>();
   /** Issues this process worked on that have since been released as done: they reached a terminal
    *  state, or left the active states after a successful worker run (e.g. handed off for review). */
-  readonly finished = new Set<string>();
+  readonly finished = new Map<string, FinishedEntry>();
   codexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0, cost_usd: 0 };
-  rateLimits: unknown = null;
+  /** Latest Claude rate-limit snapshot per limit window (`rateLimitType`, e.g. five_hour,
+   *  seven_day); snapshots without a type are kept under "default". */
+  rateLimits = new Map<string, unknown>();
   private history = new Map<string, IssueHistory>();
 
   private tickTimer: NodeJS.Timeout | null = null;
@@ -529,7 +547,10 @@ export class Orchestrator {
       this.codexTotals.cost_usd += ev.cost_usd - entry.cost_usd;
       entry.cost_usd = ev.cost_usd;
     }
-    if (ev.rate_limits !== undefined) this.rateLimits = ev.rate_limits;
+    if (ev.rate_limits !== undefined && ev.rate_limits !== null) {
+      const t = (ev.rate_limits as { rateLimitType?: unknown }).rateLimitType;
+      this.rateLimits.set(typeof t === "string" && t ? t : "default", ev.rate_limits);
+    }
 
     const rec: RecentEvent = { at: ev.timestamp, event: ev.event, message: ev.message ?? null };
     entry.recent_events.push(rec);
@@ -569,6 +590,10 @@ export class Orchestrator {
     const log = this.log.child({ issue_id: entry.issue_id, issue_identifier: entry.identifier, session_id: entry.session_id ?? undefined });
     const hist = this.historyFor(entry.issue);
     hist.last_state = entry.issue.state;
+    hist.runs++;
+    hist.turns += entry.turn_count;
+    hist.tokens += entry.codex_total_tokens;
+    hist.seconds_running += (Date.now() - entry.started_at) / 1000;
 
     if (entry.stop) {
       const { kind, cleanup } = entry.stop;
@@ -585,7 +610,7 @@ export class Orchestrator {
         });
       } else {
         this.claimed.delete(entry.issue_id);
-        if (kind === "terminal") this.finished.add(entry.issue_id);
+        if (kind === "terminal") this.markFinished(entry.issue);
         hist.last_status = "released";
         log.info("worker stopped by reconciliation; claim released", { reason: kind, cleanup_workspace: cleanup });
         if (cleanup) await this.workspaces.removeWorkspace(entry.identifier, this.removeEnv(entry.issue));
@@ -677,7 +702,7 @@ export class Orchestrator {
     }
     if (this.isTerminal(issue.state)) {
       this.claimed.delete(issueId);
-      this.finished.add(issueId);
+      this.markFinished(issue);
       log.info("retry: issue is terminal; cleaning workspace and releasing", { state: issue.state });
       await this.workspaces.removeWorkspace(issue.identifier, this.removeEnv(issue));
       this.notify();
@@ -694,7 +719,7 @@ export class Orchestrator {
     }
     if (!this.isActive(issue.state) || !this.issueRoutable(issue)) {
       this.claimed.delete(issueId);
-      if (this.completed.has(issueId) && !this.isActive(issue.state)) this.finished.add(issueId);
+      if (this.completed.has(issueId) && !this.isActive(issue.state)) this.markFinished(issue);
       log.info("retry: issue not eligible; claim released", { state: issue.state, dispatchable: issue.dispatchable });
       this.notify();
       return;
@@ -790,12 +815,44 @@ export class Orchestrator {
         recent_events: [],
         last_state: issue.state,
         last_status: "unclaimed",
+        runs: 0,
+        turns: 0,
+        tokens: 0,
+        seconds_running: 0,
       };
       this.history.set(issue.identifier, h);
       if (this.history.size > 1000) this.history.delete(this.history.keys().next().value!);
     }
     h.url = issue.url ?? h.url;
     return h;
+  }
+
+  private markFinished(issue: Issue): void {
+    this.finished.set(issue.id, {
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      url: issue.url,
+      title: issue.title,
+      state: issue.state,
+      finished_at: Date.now(),
+    });
+    this.historyFor(issue).last_state = issue.state;
+  }
+
+  private finishedRow(f: FinishedEntry) {
+    const h = this.history.get(f.identifier);
+    return {
+      issue_id: f.issue_id,
+      issue_identifier: f.identifier,
+      issue_url: f.url,
+      title: f.title,
+      state: f.state,
+      finished_at: new Date(f.finished_at).toISOString(),
+      runs: h?.runs ?? 0,
+      turns: h?.turns ?? 0,
+      total_tokens: h?.tokens ?? 0,
+      seconds_running: Math.round((h?.seconds_running ?? 0) * 10) / 10,
+    };
   }
 
   private runningRow(e: RunningEntry) {
@@ -846,6 +903,7 @@ export class Orchestrator {
       counts: { running: this.running.size, retrying: this.retryAttempts.size, claimed: this.claimed.size, finished: this.finished.size },
       running: [...this.running.values()].map((e) => this.runningRow(e)),
       retrying: [...this.retryAttempts.values()].sort((a, b) => a.due_at_ms - b.due_at_ms).map((r) => this.retryRow(r)),
+      finished: [...this.finished.values()].sort((a, b) => b.finished_at - a.finished_at).map((f) => this.finishedRow(f)),
       codex_totals: {
         input_tokens: this.codexTotals.input_tokens,
         output_tokens: this.codexTotals.output_tokens,
@@ -853,7 +911,7 @@ export class Orchestrator {
         seconds_running: Math.round((this.codexTotals.seconds_running + active) * 10) / 10,
         cost_usd: Math.round(this.codexTotals.cost_usd * 10000) / 10000,
       },
-      rate_limits: this.rateLimits ?? null,
+      rate_limits: this.rateLimits.size ? Object.fromEntries(this.rateLimits) : null,
       health: {
         workflow_path: this.effective?.cfg.workflow_path ?? null,
         config_error: this.lastConfigError,

@@ -58,7 +58,8 @@ rl.on("line", async (line) => {
   const msgUsage = (out_) => ({ input_tokens: 60, cache_read_input_tokens: 20, cache_creation_input_tokens: 0, output_tokens: out_ });
   out({ type: "assistant", session_id: sessionId, message: { id: `msg_${turns}`, usage: msgUsage(5), content: [{ type: "text", text: `working turn ${turns}` }] } });
   out({ type: "assistant", session_id: sessionId, message: { id: `msg_${turns}`, usage: msgUsage(10), content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }] } });
-  out({ type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 123 } });
+  out({ type: "rate_limit_event", rate_limit_info: { status: "allowed", rateLimitType: "five_hour", resetsAt: 123 } });
+  out({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", rateLimitType: "seven_day", resetsAt: 456 } });
   out({
     type: "result",
     subtype: mode === "fail" ? "error_during_execution" : "success",

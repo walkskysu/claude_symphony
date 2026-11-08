@@ -63,7 +63,7 @@ claude-symphony [check|labels] [config-file] [--port N] [--host H] [--log-file F
 - `thread_id` = Symphony 预先生成并通过 `--session-id` 传入的 Claude 会话 ID；`turn_id` = `turn-N`；`session_id = <thread_id>-<turn_id>`。
 - 一个 turn = 写入一条 `{"type":"user",…}` 消息，直到收到 `{"type":"result"}`。续跑 turn 复用同一个活进程/会话，只发送续跑指引，不重发原始提示。
 - `result.subtype == "success"` → `turn_completed`；其他 subtype 或 `is_error` → `turn_failed`；进程退出 → `port_exit`（退出码 127 → `codex_not_found`）；首个 `system/init` 超过 `read_timeout_ms` → `response_timeout`；输出静默超过 `turn_timeout_ms` → `turn_timeout`。
-- Token 统计：每个 `result.usage` 累加为线程绝对总量（input = input + cache_creation + cache_read），orchestrator 按“与上次上报的差值”累计，避免重复计数；`rate_limit_event` 记录为最新限流快照；`total_cost_usd` 额外统计为 `cost_usd`。
+- Token 统计：每个 `result.usage` 累加为线程绝对总量（input = input + cache_creation + cache_read），orchestrator 按“与上次上报的差值”累计，避免重复计数；`rate_limit_event` 按 `rateLimitType`（如 `five_hour`、`seven_day`）分别记录最新快照，`/api/v1/state` 的 `rate_limits` 为 `{类型: 快照}` 对象；`total_cost_usd` 额外统计为 `cost_usd`。
 - 发出的事件：`session_started`、`startup_failed`、`turn_completed`、`turn_failed`、`turn_input_required`、`approval_auto_approved`、`unsupported_tool_call`、`tool_call_completed`、`tool_call_failed`、`notification`、`other_message`、`malformed`。
 
 ## 配置文件
@@ -212,7 +212,7 @@ Liquid（liquidjs），开启 `strictVariables` + `strictFilters`。变量：`is
 ## 实现定义的行为
 
 - 工作区位置存在非目录文件时：失败，不删除。
-- **token 统计与仪表盘**：token 数在 agent 运行中即时累加（取 Claude Code 每条 `assistant` 流式消息携带的 usage，同一 API 消息拆成多条事件时不重复计算），每轮结束时以 `result` 的 usage 为准。仪表盘每 2 秒刷新，不显示费用（`cost_usd` 仍保留在 `/api/v1/state` 中：取自 Claude Code `result` 消息的 `total_cost_usd`，这是整个会话的累计值并按 API 公开价格估算，因此每个会话取最新值、各会话之间相加；使用订阅时不代表实际扣费）；每个运行中的 issue 在 Running 表下方有一个可滚动的消息流（最近 100 条事件，停在底部时自动跟随最新消息），`/api/v1/state` 的 running 行也带有 `recent_events`。
+- **token 统计与仪表盘**：token 数在 agent 运行中即时累加（取 Claude Code 每条 `assistant` 流式消息携带的 usage，同一 API 消息拆成多条事件时不重复计算），每轮结束时以 `result` 的 usage 为准。仪表盘每 2 秒刷新，不显示费用（`cost_usd` 仍保留在 `/api/v1/state` 中：取自 Claude Code `result` 消息的 `total_cost_usd`，这是整个会话的累计值并按 API 公开价格估算，因此每个会话取最新值、各会话之间相加；使用订阅时不代表实际扣费）；每个运行中的 issue 在 Running 表下方有一个可滚动的消息流（最近 100 条事件，停在底部时自动跟随最新消息），`/api/v1/state` 的 running 行也带有 `recent_events`。Retry queue 下方的 Finished 表列出本次进程运行期间完成的 issue（进入终态，或成功运行后离开活跃状态，如转入 In Review），最新完成的在前，显示最终状态、完成时间以及累计的运行次数、轮数、token 数和运行时长；对应 `/api/v1/state` 的 `finished` 数组。重启服务后清空。
 - **GitHub 网络错误**：只读的 GET 请求在网络层失败（连接重置、DNS、超时等，非 HTTP 错误状态）时，间隔 1s、3s 自动重试 2 次，每次重试记一条 warn 日志；写操作（评论、改标签、建 PR 等）不重试，因为请求可能已经生效。错误信息包含底层原因（如 `fetch failed: read ECONNRESET`、`getaddrinfo ENOTFOUND ...`）而不只是 `fetch failed`。
 - `after_create` 失败：删除刚创建的目录。复用的工作区不会被破坏性重置。
 - 协调终止（terminal / 非活跃 / 不可路由 / 不可见）会释放 claim，不重试；只有 terminal 会清理工作区。停滞终止按指数退避重试。

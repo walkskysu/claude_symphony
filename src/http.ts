@@ -104,6 +104,11 @@ a{color:var(--accent)}button{background:var(--accent);color:#fff;border:0;border
 .ev{display:grid;grid-template-columns:auto auto 1fr;gap:10px;padding:2px 12px;white-space:pre-wrap;word-break:break-word}
 .ev time{color:var(--muted)}.ev i{font-style:normal;color:var(--muted)}.ev.tool i{color:var(--accent)}.ev.done i{color:var(--ok)}.ev.fail i{color:var(--err)}
 @media (max-width:600px){.ev{grid-template-columns:auto 1fr}.ev i{display:none}}
+.rl{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.rl .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px}
+.rl .top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}.rl .top b{font-size:15px}
+.badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}.badge.ok{color:var(--ok)}.badge.warn{color:var(--warn)}.badge.err{color:var(--err)}.badge.unk{color:var(--muted)}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:6px 0 10px}.bar i{display:block;height:100%;background:var(--ok)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12px;margin:0}.kv dt{color:var(--muted)}.kv dd{margin:0;font-variant-numeric:tabular-nums;word-break:break-word}
 </style></head><body>
 <header><h1>Symphony <span style="color:var(--muted);font-weight:400">· Claude Code × GitHub Issues</span></h1>
 <div><span id="health" class="ok"></span> <button id="refresh">Refresh now</button></div></header>
@@ -112,11 +117,13 @@ a{color:var(--accent)}button{background:var(--accent);color:#fff;border:0;border
 <h2>Running</h2><div class="wrap"><table><thead><tr><th>Issue</th><th>State</th><th class="num">Turns</th><th>Last event</th><th>Started</th><th class="num">Tokens</th></tr></thead><tbody id="running"></tbody></table></div>
 <h2>Messages</h2><div class="feeds" id="feeds"></div>
 <h2>Retry queue</h2><div class="wrap"><table><thead><tr><th>Issue</th><th class="num">Attempt</th><th>Due</th><th>Error</th></tr></thead><tbody id="retrying"></tbody></table></div>
-<h2>Rate limits</h2><div class="wrap"><pre id="rl" class="empty" style="margin:0;white-space:pre-wrap"></pre></div>
+<h2>Finished</h2><div class="wrap"><table><thead><tr><th>Issue</th><th>Final state</th><th>Finished</th><th class="num">Runs</th><th class="num">Turns</th><th class="num">Tokens</th><th class="num">Runtime</th></tr></thead><tbody id="finished"></tbody></table></div>
+<h2>Rate limits</h2><div id="rl" class="rl"></div>
 </main>
 <script>
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const rel=t=>{if(!t)return"–";const d=(Date.parse(t)-Date.now())/1000;const a=Math.abs(d);const v=a<60?Math.round(a)+"s":a<3600?Math.round(a/60)+"m":Math.round(a/3600)+"h";return d<0?v+" ago":"in "+v};
+const dur=sec=>{sec=Math.round(sec||0);return sec<60?sec+"s":sec<3600?Math.floor(sec/60)+"m "+(sec%60)+"s":Math.floor(sec/3600)+"h "+Math.floor(sec%3600/60)+"m"};
 const link=(id,url)=>url?'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(id)+'</a>':esc(id);
 async function load(){
  try{const s=await (await fetch("api/v1/state")).json();
@@ -126,8 +133,45 @@ async function load(){
  document.getElementById("running").innerHTML=s.running.length?s.running.map(r=>'<tr><td>'+link(r.issue_identifier,r.issue_url)+'<div class="msg">'+esc(r.title)+'</div></td><td>'+esc(r.state)+(r.stopping?' <span class="err">(stopping: '+esc(r.stopping)+')</span>':'')+'</td><td class="num">'+r.turn_count+'</td><td>'+esc(r.last_event??"–")+'<div class="msg">'+rel(r.last_event_at)+'</div></td><td>'+rel(r.started_at)+'</td><td class="num">'+r.tokens.total_tokens.toLocaleString()+'</td></tr>').join(""):'<tr><td colspan="6" class="empty">No active sessions</td></tr>';
  renderFeeds(s.running);
  document.getElementById("retrying").innerHTML=s.retrying.length?s.retrying.map(r=>'<tr><td>'+link(r.issue_identifier,r.issue_url)+'</td><td class="num">'+r.attempt+'</td><td>'+rel(r.due_at)+'</td><td class="msg">'+esc(r.error??"continuation")+'</td></tr>').join(""):'<tr><td colspan="4" class="empty">Queue empty</td></tr>';
- document.getElementById("rl").textContent=s.rate_limits?JSON.stringify(s.rate_limits,null,2):"No rate-limit data yet";
+ const fin=s.finished||[];
+ document.getElementById("finished").innerHTML=fin.length?fin.map(f=>'<tr><td>'+link(f.issue_identifier,f.issue_url)+'<div class="msg">'+esc(f.title)+'</div></td><td>'+esc(f.state)+'</td><td>'+rel(f.finished_at)+'</td><td class="num">'+f.runs+'</td><td class="num">'+f.turns+'</td><td class="num">'+f.total_tokens.toLocaleString()+'</td><td class="num">'+dur(f.seconds_running)+'</td></tr>').join(""):'<tr><td colspan="7" class="empty">Nothing finished yet</td></tr>';
+ renderRateLimits(s.rate_limits);
  }catch(e){const he=document.getElementById("health");he.className="err";he.textContent="state unavailable: "+e.message}
+}
+// Rate limits: Claude Code's rate_limit_info is passed through verbatim, so render the fields we
+// know (status, window type, reset time, utilization, overage) and list anything else as-is.
+const RL_TYPES={five_hour:"5-hour window",seven_day:"7-day window",seven_day_opus:"7-day window (Opus)",seven_day_sonnet:"7-day window (Sonnet)",overage:"Overage"};
+const RL_STATUS={allowed:["ok","Allowed"],allowed_warning:["warn","Near limit"],rejected:["err","Limited"]};
+const RL_KNOWN=new Set(["type","uuid","session_id","rate_limit_info","status","rateLimitType","resetsAt","utilization","overageStatus","overageResetsAt","isUsingOverage","overageDisabledReason"]);
+const toTime=v=>{if(v==null||v==="")return null;const n=typeof v==="number"?v:Number(v);const ms=isNaN(n)?Date.parse(v):n<1e12?n*1000:n;return isNaN(ms)?null:new Date(ms)};
+const when=v=>{const d=toTime(v);return d?d.toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false})+" ("+rel(d.toISOString())+")":esc(v)};
+const label=k=>k.replace(/_/g," ").replace(/([a-z])([A-Z])/g,"$1 $2").replace(/^./,c=>c.toUpperCase());
+const fmtVal=v=>v===true?"yes":v===false?"no":typeof v==="object"&&v?esc(JSON.stringify(v)):esc(v);
+function rlCard(o){
+ if(!o||typeof o!=="object")return '<div class="card">'+esc(o)+'</div>';
+ const st=RL_STATUS[o.status]||["unk",o.status||"Unknown"];
+ const title=RL_TYPES[o.rateLimitType]||(o.rateLimitType?label(o.rateLimitType):"Claude usage");
+ let h='<div class="card"><div class="top"><b>'+esc(title)+'</b><span class="badge '+st[0]+'">'+esc(st[1])+'</span></div>';
+ if(typeof o.utilization==="number"){const pct=Math.max(0,Math.min(100,o.utilization<=1?o.utilization*100:o.utilization));const c=pct>=90?"var(--err)":pct>=70?"var(--warn)":"var(--ok)";
+  h+='<div class="bar"><i style="width:'+pct.toFixed(1)+'%;background:'+c+'"></i></div>'}
+ const rows=[];
+ if(typeof o.utilization==="number")rows.push(["Used",(o.utilization<=1?o.utilization*100:o.utilization).toFixed(0)+"%"]);
+ if(o.resetsAt!=null)rows.push(["Resets",when(o.resetsAt)]);
+ if(o.isUsingOverage!=null)rows.push(["Using overage",fmtVal(o.isUsingOverage)]);
+ if(o.overageStatus!=null)rows.push(["Overage",esc((RL_STATUS[o.overageStatus]||[0,o.overageStatus])[1])]);
+ if(o.overageResetsAt!=null)rows.push(["Overage resets",when(o.overageResetsAt)]);
+ if(o.overageDisabledReason!=null)rows.push(["Overage off",esc(label(String(o.overageDisabledReason)))]);
+ for(const [k,v] of Object.entries(o))if(!RL_KNOWN.has(k)&&v!=null)rows.push([esc(label(k)),/resets?at$/i.test(k)?when(v):fmtVal(v)]);
+ if(rows.length)h+='<dl class="kv">'+rows.map(([k,v])=>'<dt>'+k+'</dt><dd>'+v+'</dd>').join("")+'</dl>';
+ return h+'</div>';
+}
+function renderRateLimits(rl){
+ const box=document.getElementById("rl");
+ if(!rl){box.innerHTML='<div class="wrap"><div class="empty">No rate-limit data yet</div></div>';return}
+ // rl is {rateLimitType: snapshot}; shorter windows first, unknown types after.
+ const order=Object.keys(RL_TYPES);const rank=k=>{const i=order.indexOf(k);return i<0?order.length:i};
+ const list=Object.entries(rl).sort(([a],[b])=>rank(a)-rank(b)||a.localeCompare(b)).map(([,v])=>v);
+ box.innerHTML=list.map(rlCard).join("");
 }
 // Message feeds: one scrolling log per running issue. Each log is only re-rendered when it gets
 // new events. Newest events are shown first; the log stays at the top unless the reader has

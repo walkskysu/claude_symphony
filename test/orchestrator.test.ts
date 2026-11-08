@@ -169,6 +169,9 @@ describe("orchestrator", () => {
     assert.ok(r.due_at_ms - performance.now() <= 1000);
     assert.ok(orch.completed.has("1"));
     assert.equal(orch.codexTotals.total_tokens, 170 * 3);
+    // One snapshot per rate-limit window: the seven_day event doesn't replace the five_hour one.
+    assert.deepEqual([...orch.rateLimits.keys()].sort(), ["five_hour", "seven_day"]);
+    assert.equal((orch.rateLimits.get("seven_day") as { status: string }).status, "allowed_warning");
 
     const lines = fs.readFileSync(rec, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     const start = lines.find((l) => l.kind === "start");
@@ -231,6 +234,10 @@ describe("orchestrator", () => {
     assert.equal(fs.existsSync(path.join(dir, "ws", "T-2")), true);
     assert.equal(orch.claimed.size, 0);
     assert.equal(orch.retryAttempts.size, 0);
+    // Only the terminal issue is listed as finished, with its final state and run totals.
+    const fin = orch.snapshot().finished;
+    assert.deepEqual(fin.map((f) => [f.issue_identifier, f.state, f.runs]), [["T-1", "Done", 1]]);
+    assert.equal(fin[0].title, "Test issue");
   });
 
   it("reconciliation with no running issues is a no-op", async () => {
@@ -316,6 +323,12 @@ describe("http extension", () => {
     assert.equal(st.counts.running, 1);
     assert.equal(st.running[0].issue_identifier, "T-1");
     assert.ok("codex_totals" in st && "rate_limits" in st);
+    // Rate limits are served as {rateLimitType: snapshot}.
+    orch.rateLimits.set("five_hour", { status: "allowed", rateLimitType: "five_hour" });
+    orch.rateLimits.set("seven_day", { status: "allowed_warning", rateLimitType: "seven_day" });
+    const st2 = await (await fetch(`${base}/api/v1/state`)).json();
+    assert.deepEqual(Object.keys(st2.rate_limits), ["five_hour", "seven_day"]);
+    assert.equal(st2.rate_limits.seven_day.status, "allowed_warning");
     const d = await fetch(`${base}/api/v1/T-1`);
     assert.equal(d.status, 200);
     assert.equal((await d.json()).status, "running");
